@@ -422,14 +422,25 @@ VGM_NES2GB_SAMPLES=~/mis-temas python3 -m unittest discover -s tests -t .
 Sin esa variable, `tests/test_real_theme.py` busca el BGM del runner de RetroSharp
 y, si tampoco está, se salta solo.
 
-209 tests. Los que cubren la quinta voz están en `test_dpcm.py` (decodificador,
-rasgos y clasificador), `test_allocator.py` (coste, expropiación y restauración) y
-`test_variants.py` (una salida por estrategia, todas importables, y `off` byte a
-byte igual que antes de que existiera nada de esto).
+245 tests. Los que cubren la quinta voz están en `test_dpcm.py` (decodificador,
+rasgos y clasificador), `test_allocator.py` (coste, expropiación, choque de
+registro y restauración) y `test_variants.py` (una salida por estrategia, todas
+importables, y `off` byte a byte igual que antes de que existiera nada de esto).
 
 ## Trabajo futuro
 
 - Soporte de chips de expansión (VRC6 es el más plausible: son dos pulses más).
 - Formas de onda de wave RAM alternativas al triángulo, por tema.
-- Roles `tom` y `tonal` del clasificador: implementados, pero sin material real
-  que los ejercite todavía.
+- El 14 % de energía que aún sobra en 1-2 kHz del bajo aislado, procedente de los
+  silencios: bajar `NR32` a 0 salta de la onda al cero, mientras que el triángulo
+  del NES al callar se congela en su último valor. Un fade escalonado
+  (100 → 50 → 25 → 0) lo suavizaría a costa de añadir cola a las notas.
+
+## Licencia
+
+MIT. Ver [LICENSE](LICENSE).
+
+El repositorio contiene **sólo código**. No se versiona ni se distribuye material
+derivado de ROMs comerciales: los fixtures de los tests son VGM de NES sintéticos
+generados por `vgm_nes2gb/testing.py`, y las conversiones de temas reales se
+quedan en tu máquina.

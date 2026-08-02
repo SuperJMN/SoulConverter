@@ -156,5 +156,31 @@ class RetriggerTests(unittest.TestCase):
         self.assertFalse(apu.snapshot(1, 0).pulse1.retriggered)
 
 
+class DmcTriggerTests(unittest.TestCase):
+    """What a consumer is told about a sample that starts and ends immediately."""
+
+    def test_a_one_byte_sample_still_says_which_sample_started(self):
+        """Drivers fire this at boot by enabling the DMC with the length at zero.
+
+        The trigger is real, so hiding the reference behind a None leaves the
+        caller an event it cannot look up - and anything that tried would fail
+        on a sample it never asked to be told about.
+        """
+        apu = NesApu(CPU_HZ)
+        apu.write(0x17, 0x40)
+        apu.write(0x10, 0x0F)
+        apu.write(0x12, 0x00)
+        apu.write(0x13, 0x00)
+        apu.write(0x15, 0x1F)
+        apu.run_to_cycle(CPU_HZ // 60)
+
+        state = apu.snapshot(1, CPU_HZ // 60).dmc
+
+        self.assertTrue(state.started)
+        self.assertIsNotNone(state.sample)
+        self.assertEqual(state.sample.length, 1)
+        self.assertFalse(state.playing)
+
+
 if __name__ == "__main__":
     unittest.main()

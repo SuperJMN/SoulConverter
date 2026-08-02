@@ -72,17 +72,63 @@ class CommandTests(unittest.TestCase):
         stream = parse_bytes(minimal_vgm(commands))
         self.assertEqual([w.sample for w in stream.writes], [0, 16 + 735 + 882 + 4])
 
-    def test_drops_and_counts_dpcm_register_writes(self):
+    def test_keeps_dpcm_register_writes_for_resynthesis(self):
+        # The DMC is re-synthesised on the Game Boy, so its writes must survive
+        # the reader. The counter stays for the `--dpcm off` report.
         commands = b"\xb4\x10\x0f\xb4\x12\x40\xb4\x00\x01\x66"
         stream = parse_bytes(minimal_vgm(commands))
-        self.assertEqual([w.register for w in stream.writes], [0x00])
+        self.assertEqual([w.register for w in stream.writes], [0x10, 0x12, 0x00])
         self.assertEqual(stream.dropped.dpcm_register_writes, 2)
 
-    def test_drops_and_counts_dpcm_data_blocks(self):
-        block = b"\x67\x66\x07" + struct.pack("<I", 4) + b"\xde\xad\xbe\xef"
+    def test_loads_a_nes_apu_ram_data_block_into_sample_memory(self):
+        payload = bytes(range(16))
+        block = (
+            b"\x67\x66\xc2"
+            + struct.pack("<I", 2 + len(payload))
+            + struct.pack("<H", 0xE000)
+            + payload
+        )
         stream = parse_bytes(minimal_vgm(block + b"\x66"))
-        self.assertEqual(stream.dropped.dpcm_block_count, 1)
-        self.assertEqual(stream.dropped.dpcm_block_bytes, 4)
+        self.assertEqual(stream.dpcm_rom.block_count, 1)
+        self.assertEqual(len(stream.dpcm_rom), 16)
+        self.assertEqual(stream.dpcm_rom.read(0xE000), 0)
+        self.assertEqual(stream.dpcm_rom.read(0xE00F), 15)
+        self.assertEqual(stream.dpcm_rom.covers(0xE000, 16), 16)
+
+    def test_loads_a_dpcm_rom_image_block(self):
+        payload = b"\xde\xad\xbe\xef"
+        block = (
+            b"\x67\x66\x07"
+            + struct.pack("<I", 8 + len(payload))
+            + struct.pack("<II", 0x4000, 0xC100)
+            + payload
+        )
+        stream = parse_bytes(minimal_vgm(block + b"\x66"))
+        self.assertEqual(stream.dpcm_rom.read(0xC100), 0xDE)
+        self.assertEqual(stream.dpcm_rom.read(0xC103), 0xEF)
+
+    def test_a_rom_image_offset_is_taken_from_the_dmc_base(self):
+        # Some rips store an offset into the image rather than a DMC address.
+        payload = b"\x01\x02"
+        block = (
+            b"\x67\x66\x07"
+            + struct.pack("<I", 8 + len(payload))
+            + struct.pack("<II", 0x4000, 0x0040)
+            + payload
+        )
+        stream = parse_bytes(minimal_vgm(block + b"\x66"))
+        self.assertEqual(stream.dpcm_rom.read(0xC040), 0x01)
+
+    def test_missing_sample_pages_read_as_silence(self):
+        stream = parse_bytes(minimal_vgm(b"\x66"))
+        self.assertFalse(stream.dpcm_rom)
+        self.assertEqual(stream.dpcm_rom.read(0xE000), 0)
+        self.assertEqual(stream.dpcm_rom.covers(0xE000, 16), 0)
+
+    def test_counts_direct_dac_writes_because_they_are_software_pcm(self):
+        commands = b"\xb4\x11\x40\xb4\x11\x50\xb4\x00\x01\x66"
+        stream = parse_bytes(minimal_vgm(commands))
+        self.assertEqual(stream.direct_dac_writes, 2)
 
     def test_rejects_expansion_audio_registers(self):
         with self.assertRaises(UnsupportedChipError) as raised:

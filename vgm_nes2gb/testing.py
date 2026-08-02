@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import struct
 
+import numpy as np
+
 NTSC_CPU_HZ = 1789772
 VGM_SAMPLE_RATE = 44100
 FRAME_SAMPLES = 735
@@ -31,9 +33,17 @@ def build_nes_vgm(
     cpu_clock_hz: int = NTSC_CPU_HZ,
     loop_frame: int | None = None,
     gd3_fields: list[str] | None = None,
+    dpcm_rom: dict[int, bytes] | None = None,
 ) -> bytes:
-    """Encode per-frame ``(register, value)`` writes as a NES VGM 1.61 file."""
+    """Encode per-frame ``(register, value)`` writes as a NES VGM 1.61 file.
+
+    ``dpcm_rom`` maps a base address to sample bytes and is emitted as ``0xC2``
+    data blocks ahead of the first frame, which is where a real rip puts them.
+    """
     data = bytearray()
+    for address, payload in (dpcm_rom or {}).items():
+        body = struct.pack("<H", address & 0xFFFF) + payload
+        data.extend(b"\x67\x66\xc2" + struct.pack("<I", len(body)) + body)
     loop_offset = None
     for index, writes in enumerate(frames):
         if loop_frame is not None and index == loop_frame:
@@ -157,4 +167,243 @@ def demo_vgm(loop: bool = True) -> bytes:
         frames,
         loop_frame=1 if loop else None,
         gd3_fields=["vgm-nes2gb demo", "", "vgm-nes2gb", "", "NES/Famicom"],
+    )
+
+
+# --- DPCM fixtures ---------------------------------------------------------
+
+DMC_RATE_HZ = (
+    NTSC_CPU_HZ / 428, NTSC_CPU_HZ / 380, NTSC_CPU_HZ / 340, NTSC_CPU_HZ / 320,
+    NTSC_CPU_HZ / 286, NTSC_CPU_HZ / 254, NTSC_CPU_HZ / 226, NTSC_CPU_HZ / 214,
+    NTSC_CPU_HZ / 190, NTSC_CPU_HZ / 160, NTSC_CPU_HZ / 142, NTSC_CPU_HZ / 128,
+    NTSC_CPU_HZ / 106, NTSC_CPU_HZ / 84, NTSC_CPU_HZ / 72, NTSC_CPU_HZ / 54,
+)
+DMC_BASE = 0xC000
+
+
+def encode_dpcm(waveform, initial_level: int = 64) -> bytes:
+    """Delta-modulate a waveform the way a DPCM sample is built.
+
+    At each step the encoder picks whichever of the two available moves lands
+    closer to the target, which is the best a 1-bit encoder can do and is what
+    every real DPCM tool does. Encoding rather than shipping raw bytes means the
+    fixture exercises the decoder against material with the same slew-rate limit
+    as the real thing.
+    """
+    target = np.clip(np.asarray(waveform, dtype=float), -1.0, 1.0) * 63.0 + 64.0
+    level = int(np.clip(initial_level, 0, 127))
+    bits: list[int] = []
+    for wanted in target:
+        up = min(127, level + 2)
+        down = max(0, level - 2)
+        if abs(up - wanted) <= abs(down - wanted):
+            bits.append(1)
+            level = up
+        else:
+            bits.append(0)
+            level = down
+    while len(bits) % 8:
+        bits.append(bits[-1] if bits else 0)
+    return bytes(
+        sum(bit << index for index, bit in enumerate(bits[offset : offset + 8]))
+        for offset in range(0, len(bits), 8)
+    )
+
+
+def _decay(count: int, seconds: float, rate: float, shape: float = 1.0):
+    return np.exp(-np.linspace(0.0, count / rate, count) / (seconds / 3.0)) ** shape
+
+
+def synth_kick(seconds: float = 0.09, rate: float = DMC_RATE_HZ[15]):
+    """A pitch-swept sine with a click on the front.
+
+    Shaped after the kicks actually found in NES rips rather than after a
+    studio kick: those sit higher and carry a bright transient, because the
+    slew rate of 1-bit delta modulation cannot render a deep, clean thud.
+    """
+    count = int(seconds * rate)
+    time = np.arange(count) / rate
+    sweep = 260.0 * np.exp(-time / 0.030) + 80.0
+    phase = 2 * np.pi * np.cumsum(sweep) / rate
+    body = np.sin(phase) * _decay(count, seconds, rate)
+    click = np.zeros(count)
+    edge = min(count, int(rate * 0.004))
+    rng = np.random.default_rng(20240102)
+    click[:edge] = rng.standard_normal(edge) * np.linspace(0.7, 0.0, edge)
+    mixed = body + click
+    return mixed / (np.abs(mixed).max() + 1e-9)
+
+
+def synth_bass_note(seconds: float = 0.25, frequency_hz: float = 82.0,
+                    rate: float = DMC_RATE_HZ[15]):
+    """A plucked bass note: strongly periodic, but struck rather than held.
+
+    This is the sample that breaks a waveform-only classifier. Every physical
+    property the rules measure says kick drum - low, dark, a sharp attack and a
+    fast decay - and only the fact that the driver plays it at several rates
+    reveals that it is an instrument. Real material does exactly this: NES bass
+    lines are single plucks retuned by the DMC rate.
+    """
+    count = int(seconds * rate)
+    time = np.arange(count) / rate
+    phase = 2 * np.pi * frequency_hz * time
+    body = (
+        np.sin(phase)
+        + 0.5 * np.sin(2 * phase)
+        + 0.25 * np.sin(3 * phase)
+    )
+    shaped = body * np.exp(-time / 0.06)
+    return shaped / (np.abs(shaped).max() + 1e-9)
+
+
+def synth_snare(seconds: float = 0.06, rate: float = DMC_RATE_HZ[15]):
+    """Band-passed noise centred near 1.5 kHz over a short shell tone."""
+    count = int(seconds * rate)
+    rng = np.random.default_rng(20240607)
+    noise = rng.standard_normal(count)
+    window = max(2, int(rate / 4000.0))
+    smoothed = np.convolve(noise, np.ones(window) / window, mode="same")
+    # Subtracting a slower average leaves a band rather than a low-passed blur,
+    # which is what separates a snare from a tom in the classifier.
+    slow = np.convolve(smoothed, np.ones(window * 6) / (window * 6), mode="same")
+    body = smoothed - slow
+    tone = np.sin(2 * np.pi * 440.0 * np.arange(count) / rate) * 0.3
+    mixed = body / (np.abs(body).max() + 1e-9) + tone
+    return mixed / (np.abs(mixed).max() + 1e-9) * _decay(count, seconds, rate)
+
+
+def synth_hat(seconds: float = 0.02, rate: float = DMC_RATE_HZ[15]):
+    """High-passed noise, over almost as soon as it starts."""
+    count = int(seconds * rate)
+    rng = np.random.default_rng(19890421)
+    noise = rng.standard_normal(count)
+    bright = np.diff(noise, prepend=noise[0])
+    return bright / (np.abs(bright).max() + 1e-9) * _decay(count, seconds, rate, 1.5)
+
+
+def synth_dac_blip(seconds: float = 0.03, rate: float = DMC_RATE_HZ[15]):
+    """The levelling glitch a driver emits when it walks the DAC to mid-scale.
+
+    It is not an instrument and must never be re-synthesised: it has no attack,
+    all of its motion is one-way, and what little it puts in the audible band
+    sits below anything the DMG can produce.
+    """
+    count = int(seconds * rate)
+    return np.linspace(-1.0, 1.0, count)
+
+
+def dpcm_trigger(address: int, length_bytes: int, rate_index: int = 15, loop: bool = False):
+    """Register writes that start a DPCM sample, as a driver would emit them."""
+    return [
+        (0x10, (0x40 if loop else 0x00) | (rate_index & 0x0F)),
+        (0x12, ((address - DMC_BASE) // 64) & 0xFF),
+        (0x13, max(0, (length_bytes - 1) // 16) & 0xFF),
+        (0x15, 0x1F),
+    ]
+
+
+def dpcm_stop():
+    return [(0x15, 0x0F)]
+
+
+def dpcm_kit(base: int = 0xC000) -> tuple[dict[int, bytes], dict[str, tuple[int, int]]]:
+    """A three-piece sampled drum kit and where each piece lives.
+
+    Addresses are 64-byte aligned because ``$4012`` can only express that.
+    """
+    rom: dict[int, bytes] = {}
+    layout: dict[str, tuple[int, int]] = {}
+    address = base
+    for name, waveform in (
+        ("kick", synth_kick()),
+        ("snare", synth_snare()),
+        ("hat", synth_hat()),
+    ):
+        payload = encode_dpcm(waveform)
+        rom[address] = payload
+        layout[name] = (address, len(payload))
+        address += (len(payload) + 63) // 64 * 64
+    return rom, layout
+
+
+def dpcm_demo_song() -> tuple[list[list[tuple[int, int]]], dict[int, bytes]]:
+    """A two-bar beat over a bass line, with the drums as DPCM samples.
+
+    The tonal channels stay busy throughout so the allocator has to make a real
+    decision rather than finding everything idle.
+    """
+    rom, layout = dpcm_kit()
+    pattern = ["kick", "hat", "snare", "hat", "kick", "hat", "snare", "hat"]
+    bass = [82.41, 82.41, 110.0, 98.0]
+
+    # Enable the four tonal channels but leave the DMC off: with $4012/$4013
+    # still zero, setting bit 4 here would fire a one-byte sample that no
+    # driver intends and that would show up as a spurious hit.
+    frames: list[list[tuple[int, int]]] = [[(0x15, 0x0F), (0x17, 0x40)]]
+    for step, piece in enumerate(pattern * 2):
+        address, length = layout[piece]
+        writes = list(dpcm_trigger(address, length))
+        if step % 2 == 0:
+            writes += triangle_note(bass[(step // 2) % len(bass)])
+            writes += pulse_note(0, 329.63 if step % 4 == 0 else 392.0, 10, DUTY_50)
+            writes += pulse_note(1, 246.94, 8, DUTY_25, decay=True)
+        frames.append(writes)
+        frames.extend([[] for _ in range(11)])
+
+    frames.append(pulse_off(0) + pulse_off(1) + triangle_off() + dpcm_stop())
+    frames.extend([[] for _ in range(11)])
+    return frames, rom
+
+
+def dpcm_demo_vgm(loop: bool = True) -> bytes:
+    frames, rom = dpcm_demo_song()
+    return build_nes_vgm(
+        frames,
+        loop_frame=1 if loop else None,
+        dpcm_rom=rom,
+        gd3_fields=["vgm-nes2gb dpcm demo", "", "vgm-nes2gb", "", "NES/Famicom"],
+    )
+
+
+def sampled_bass_song() -> tuple[list[list[tuple[int, int]]], dict[int, bytes]]:
+    """A melody over a bass line the DMC plays by retuning one sample.
+
+    This is the other way NES drivers use the sample channel, and the harder one
+    to convert: the DPCM is not decoration on top of the arrangement, it is the
+    bass part. The triangle plays a counter-line in a different register and
+    only some of the time, so a converter has to notice that CH3 is free often
+    enough to carry the bass without silencing the triangle wholesale.
+    """
+    payload = encode_dpcm(synth_bass_note())
+    rom = {0xC000: payload}
+    length = len(payload)
+    # One sample, five rates: the scale that gives the instrument away.
+    line = [15, 14, 13, 15, 12, 14, 15, 13]
+    melody = [659.26, 587.33, 523.25, 587.33, 659.26, 783.99, 659.26, 523.25]
+
+    frames: list[list[tuple[int, int]]] = [[(0x15, 0x0F), (0x17, 0x40)]]
+    for step, rate in enumerate(line * 2):
+        writes = list(dpcm_trigger(0xC000, length, rate_index=rate))
+        writes += pulse_note(0, melody[step % len(melody)], 11, DUTY_50)
+        if step % 4 == 0:
+            writes += pulse_note(1, 329.63, 7, DUTY_25, decay=True)
+        if step % 4 == 2:
+            writes += triangle_note(196.0)
+        elif step % 4 == 3:
+            writes += triangle_off()
+        frames.append(writes)
+        frames.extend([[] for _ in range(15)])
+
+    frames.append(pulse_off(0) + pulse_off(1) + triangle_off() + dpcm_stop())
+    frames.extend([[] for _ in range(15)])
+    return frames, rom
+
+
+def sampled_bass_vgm(loop: bool = True) -> bytes:
+    frames, rom = sampled_bass_song()
+    return build_nes_vgm(
+        frames,
+        loop_frame=1 if loop else None,
+        dpcm_rom=rom,
+        gd3_fields=["vgm-nes2gb sampled bass demo", "", "vgm-nes2gb", "", "NES/Famicom"],
     )

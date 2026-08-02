@@ -263,6 +263,12 @@ def channel_frequencies(payload: bytes, tick_hz: float) -> dict[str, np.ndarray]
         series["pulse2"][tick] = (
             apu.square_frequency(0x08, 0x09) if apu.enabled[1] else 0.0
         )
-        series["triangle"][tick] = apu.wave_frequency() if apu.enabled[2] else 0.0
+        series["triangle"][tick] = (
+            # CH3 rests at output level 0 rather than by being disabled, so a
+            # running channel turned all the way down is not sounding a note.
+            apu.wave_frequency()
+            if apu.enabled[2] and apu.registers[0x0C] & 0x60
+            else 0.0
+        )
         series["noise"][tick] = apu.noise_rate()[0] if apu.enabled[3] else 0.0
     return series

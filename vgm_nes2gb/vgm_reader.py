@@ -64,6 +64,9 @@ CHIP_CLOCK_FIELDS = {
 # audio (FDS and friends) through command 0xB4 with registers >= 0x20.
 APU_REGISTER_MAX = 0x1F
 
+# The DMC reads its samples from $C000-$FFFF, addressed in 64-byte units.
+DMC_BASE_ADDRESS = 0xC000
+
 NES_EXPANSION_REGISTER_CHIPS = (
     (0x20, 0x3F, "FDS"),
     (0x40, 0x5F, "Namco 163"),
@@ -106,6 +109,38 @@ class DroppedStats:
 
 
 @dataclass
+class DpcmRom:
+    """The sample memory the DMC channel reads from.
+
+    Sparse on purpose: a rip only carries the pages the song actually plays, and
+    the DMC address space ($C000-$FFFF) is mostly program ROM in the real thing.
+    """
+
+    data: dict[int, int] = field(default_factory=dict)
+    block_count: int = 0
+
+    def __bool__(self) -> bool:
+        return bool(self.data)
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def load(self, start: int, payload: bytes) -> None:
+        for index, byte in enumerate(payload):
+            self.data[(start + index) & 0xFFFF] = byte
+
+    def read(self, address: int) -> int:
+        """Read one byte, wrapping like the DMC does. Missing pages read as 0."""
+        return self.data.get(address & 0xFFFF, 0)
+
+    def covers(self, address: int, length: int) -> int:
+        """How many of ``length`` bytes from ``address`` are actually present."""
+        return sum(
+            1 for index in range(length) if ((address + index) & 0xFFFF) in self.data
+        )
+
+
+@dataclass
 class NesCommandStream:
     """A time-ordered stream of 2A03 register writes plus timing metadata."""
 
@@ -114,12 +149,22 @@ class NesCommandStream:
     loop_sample: int | None
     writes: list[RegisterWrite] = field(default_factory=list)
     dropped: DroppedStats = field(default_factory=DroppedStats)
+    dpcm_rom: DpcmRom = field(default_factory=DpcmRom)
     gd3: bytes | None = None
     version: int = 0
 
     @property
     def duration_seconds(self) -> float:
         return self.total_samples / VGM_SAMPLE_RATE
+
+    @property
+    def direct_dac_writes(self) -> int:
+        """Writes to $4011, which is how software PCM (speech) is played.
+
+        A song that drives $4011 in bulk is streaming a waveform through the DAC
+        rather than triggering samples, and no amount of re-synthesis recovers it.
+        """
+        return sum(1 for write in self.writes if write.register == 0x11)
 
 
 def read_bytes(path: str) -> bytes:
@@ -216,7 +261,7 @@ def _decode_commands(data: bytes, name: str, stream: NesCommandStream) -> None:
             pos += 2
             _record_write(stream, samples, register, value, start, name)
         elif command == 0x67:
-            pos = _skip_data_block(data, pos, start, name, stream)
+            pos = _read_data_block(data, pos, start, name, stream)
         elif command == 0xE0:
             _require(data, pos, 4, start, name)
             pos += 4
@@ -256,13 +301,14 @@ def _record_write(
         )
 
     if 0x10 <= register <= 0x13:
+        # Kept, not dropped: the DMC is re-synthesised on the Game Boy. The
+        # counter still records them so an `--dpcm off` run can report the cost.
         stream.dropped.dpcm_register_writes += 1
-        return
 
     stream.writes.append(RegisterWrite(samples, register, value))
 
 
-def _skip_data_block(
+def _read_data_block(
     data: bytes, pos: int, start: int, name: str, stream: NesCommandStream
 ) -> int:
     _require(data, pos, 6, start, name)
@@ -277,8 +323,22 @@ def _skip_data_block(
         raise VgmFormatError(
             f"{name}: data block at 0x{start:X} extends past the end of the file"
         )
-    # 0x07 = NES DPCM ROM data, 0xC2 = NES APU RAM write. Both are DPCM-only.
-    if block_type in (0x07, 0xC2):
+
+    body = data[pos : pos + size]
+    # 0x07 = NES DPCM ROM image, 0xC2 = NES APU RAM write. Both carry sample data.
+    if block_type == 0xC2 and len(body) >= 2:
+        stream.dpcm_rom.load(struct.unpack_from("<H", body, 0)[0], body[2:])
+        stream.dpcm_rom.block_count += 1
+        stream.dropped.dpcm_block_bytes += size
+        stream.dropped.dpcm_block_count += 1
+    elif block_type == 0x07 and len(body) >= 8:
+        address = struct.unpack_from("<I", body, 4)[0]
+        # Some rips give an absolute DMC address, others an offset into the image.
+        stream.dpcm_rom.load(
+            address if address >= DMC_BASE_ADDRESS else DMC_BASE_ADDRESS + address,
+            body[8:],
+        )
+        stream.dpcm_rom.block_count += 1
         stream.dropped.dpcm_block_bytes += size
         stream.dropped.dpcm_block_count += 1
     return pos + size

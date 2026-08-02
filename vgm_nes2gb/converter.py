@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import analyze, gb_vgm_writer, nes_apu, nes_to_gb, vgm_reader
+from . import allocator, analyze, gb_vgm_writer, nes_apu, nes_to_gb, vgm_reader
+from .allocator import DEFAULT_PRESET, PRESETS
+from .dpcm import Role
 from .nes_apu import DEFAULT_TICK_HZ
 from .nes_to_gb import CHANNEL_NAMES, VOLUME_MODE_RETRIGGER
 from .render import gb_synth, nes_synth
@@ -25,6 +27,7 @@ class ConversionResult:
     nes_audio: np.ndarray
     gb_audio: np.ndarray
     warnings: list[str] = field(default_factory=list)
+    preset: str = DEFAULT_PRESET
 
 
 def convert_file(
@@ -34,12 +37,86 @@ def convert_file(
     volume_mode: str = VOLUME_MODE_RETRIGGER,
     allow_transpose: bool = True,
     render_audio: bool = True,
+    dpcm: str = DEFAULT_PRESET,
+    dpcm_roles: dict[int, Role] | None = None,
 ) -> ConversionResult:
     """Convert one NES VGM file and measure the result."""
     stream = vgm_reader.parse(path)
     timeline = nes_apu.simulate(stream, tick_hz=tick_hz)
+    return _convert_timeline(
+        path,
+        stream,
+        timeline,
+        tick_hz=tick_hz,
+        volume_mode=volume_mode,
+        allow_transpose=allow_transpose,
+        render_audio=render_audio,
+        dpcm=dpcm,
+        dpcm_roles=dpcm_roles,
+    )
+
+
+def convert_variants(
+    path: str,
+    presets: list[str] | None = None,
+    *,
+    tick_hz: float = DEFAULT_TICK_HZ,
+    volume_mode: str = VOLUME_MODE_RETRIGGER,
+    allow_transpose: bool = True,
+    render_audio: bool = True,
+    dpcm_roles: dict[int, Role] | None = None,
+) -> list[ConversionResult]:
+    """Convert the same song once per DPCM strategy.
+
+    No single strategy wins on every song - a dense melody wants its channels
+    left alone, a sparse one has room to spare - and no metric can tell which
+    one sounds better. Producing them all and letting the ear decide is the
+    honest answer.
+
+    The source is parsed and simulated once; only the allocation and the
+    Game Boy side are redone per preset.
+    """
+    stream = vgm_reader.parse(path)
+    timeline = nes_apu.simulate(stream, tick_hz=tick_hz)
+    return [
+        _convert_timeline(
+            path,
+            stream,
+            timeline,
+            tick_hz=tick_hz,
+            volume_mode=volume_mode,
+            allow_transpose=allow_transpose,
+            render_audio=render_audio,
+            dpcm=name,
+            dpcm_roles=dpcm_roles,
+        )
+        for name in (presets or list(PRESETS))
+    ]
+
+
+def _convert_timeline(
+    path: str,
+    stream: vgm_reader.NesCommandStream,
+    timeline: nes_apu.ApuTimeline,
+    *,
+    tick_hz: float,
+    volume_mode: str,
+    allow_transpose: bool,
+    render_audio: bool,
+    dpcm: str,
+    dpcm_roles: dict[int, Role] | None,
+) -> ConversionResult:
+    if dpcm not in PRESETS:
+        raise ValueError(f"unknown DPCM preset {dpcm!r}")
+
+    plan = allocator.plan(
+        timeline, stream.dpcm_rom, preset=dpcm, overrides=dpcm_roles
+    )
     gb_timeline = nes_to_gb.convert(
-        timeline, volume_mode=volume_mode, allow_transpose=allow_transpose
+        timeline,
+        volume_mode=volume_mode,
+        allow_transpose=allow_transpose,
+        dpcm_plan=plan if plan.preset.enabled else None,
     )
     payload = gb_vgm_writer.encode(gb_timeline, stream.gd3)
 
@@ -47,7 +124,7 @@ def convert_file(
     gb_audio = np.zeros(0)
     metrics: dict = {}
     if render_audio:
-        nes_audio = nes_synth.render(timeline)
+        nes_audio = nes_synth.render(timeline, stream.dpcm_rom)
         gb_audio = gb_synth.render(payload)
         metrics = analyze.compare(
             nes_audio,
@@ -58,7 +135,7 @@ def convert_file(
 
     report = _build_report(
         path, stream, timeline, gb_timeline, payload, metrics,
-        tick_hz, volume_mode, allow_transpose,
+        tick_hz, volume_mode, allow_transpose, plan,
     )
     return ConversionResult(
         payload=payload,
@@ -66,6 +143,7 @@ def convert_file(
         nes_audio=nes_audio,
         gb_audio=gb_audio,
         warnings=report["warnings"],
+        preset=dpcm,
     )
 
 
@@ -79,6 +157,7 @@ def _build_report(
     tick_hz: float,
     volume_mode: str,
     allow_transpose: bool,
+    plan,
 ) -> dict:
     stats = gb_timeline.stats
     report = {
@@ -103,11 +182,10 @@ def _build_report(
             "tick_hz": tick_hz,
             "volume_mode": volume_mode,
             "transpose_out_of_range": allow_transpose,
+            "dpcm": plan.preset.name,
         },
+        "dpcm": _dpcm_section(stream, plan),
         "dropped": {
-            "dpcm_register_writes": stream.dropped.dpcm_register_writes,
-            "dpcm_block_bytes": stream.dropped.dpcm_block_bytes,
-            "dpcm_block_count": stream.dropped.dpcm_block_count,
             "pcm_stream_commands": stream.dropped.pcm_stream_commands,
         },
         "channels": {
@@ -130,14 +208,93 @@ def _build_report(
     return report
 
 
+def _dpcm_section(stream, plan) -> dict:
+    """What the sample channel contained and what became of it."""
+    stats = plan.stats
+    samples = []
+    for ref, analysis in plan.analyses.items():
+        features = analysis.features
+        placed = sum(1 for voice in plan.voices if voice.analysis.ref == ref and voice.layer_of is None)
+        hosts = sorted({voice.host.value for voice in plan.voices if voice.analysis.ref == ref})
+        samples.append(
+            {
+                "address": f"0x{ref.address:04X}",
+                "length": ref.length,
+                "duration_ms": round(ref.duration_seconds * 1000, 1),
+                "rate_hz": round(ref.rate_hz, 1),
+                "hits": plan.hit_counts.get(ref, 0),
+                "role": analysis.role.value,
+                "confidence": analysis.confidence,
+                "overridden": analysis.overridden,
+                "why": list(analysis.reasons),
+                "pitch_hz": round(features.pitch_hz, 1),
+                "centroid_hz": round(features.centroid_hz, 1),
+                "bands": {
+                    "low": round(features.low, 3),
+                    "mid": round(features.mid, 3),
+                    "high": round(features.high, 3),
+                },
+                "placed": placed,
+                "hosts": hosts,
+                "recipe": next(
+                    (v.recipe.description for v in plan.voices if v.analysis.ref == ref),
+                    None,
+                ),
+            }
+        )
+    samples.sort(key=lambda entry: -entry["hits"])
+    return {
+        "preset": plan.preset.name,
+        "strategy": plan.preset.description,
+        "rom_bytes": len(stream.dpcm_rom),
+        "rom_blocks": stream.dpcm_rom.block_count,
+        "register_writes": stream.dropped.dpcm_register_writes,
+        "direct_dac_writes": stream.direct_dac_writes,
+        "hits": stats.hits,
+        "placed": stats.placed,
+        "layers": stats.layers,
+        "realised_fraction": round(stats.realised_fraction, 3),
+        "dropped": {
+            "artifact": stats.dropped_artifact,
+            "too_costly": stats.dropped_too_costly,
+            "no_host": stats.dropped_no_host,
+        },
+        "per_role": stats.per_role,
+        "per_host": stats.per_host,
+        "preempted_frames": stats.preempted_frames,
+        "samples": samples,
+    }
+
+
 def _warnings(report: dict) -> list[str]:
     warnings: list[str] = []
-    dropped = report["dropped"]
-    if dropped["dpcm_register_writes"] or dropped["dpcm_block_bytes"]:
+    dpcm = report["dpcm"]
+    if dpcm["rom_bytes"] and dpcm["preset"] == "off":
         warnings.append(
-            f"DPCM dropped: {dropped['dpcm_register_writes']} register writes and "
-            f"{dropped['dpcm_block_bytes']} bytes of sample data. The Game Boy has no "
-            "DPCM channel, so sample-based percussion is missing."
+            f"DPCM dropped: {dpcm['register_writes']} register writes and "
+            f"{dpcm['rom_bytes']} bytes of sample data over {dpcm['hits']} hits. The "
+            "Game Boy has no sample channel; re-synthesise them with --dpcm safe, "
+            "balanced or full."
+        )
+    elif dpcm["hits"]:
+        missed = dpcm["dropped"]["too_costly"] + dpcm["dropped"]["no_host"]
+        if missed:
+            warnings.append(
+                f"{missed} of {dpcm['hits']} DPCM hits were dropped because no Game Boy "
+                "channel was free enough to carry them."
+            )
+        for sample in dpcm["samples"]:
+            if not sample["overridden"] and sample["confidence"] < 0.35 and sample["hits"] > 1:
+                warnings.append(
+                    f"sample {sample['address']} was classified as {sample['role']} with "
+                    f"low confidence ({sample['confidence']:.2f}); check it with "
+                    f"--dpcm-dump and override with --dpcm-role {sample['address']}=ROLE."
+                )
+    if dpcm["direct_dac_writes"] > 50 and not dpcm["rom_bytes"]:
+        warnings.append(
+            f"{dpcm['direct_dac_writes']} direct writes to $4011 with no sample data: "
+            "this song streams PCM in software (usually speech), which cannot be "
+            "re-synthesised and is not converted."
         )
 
     for name, channel in report["channels"].items():
@@ -203,12 +360,43 @@ def render_text(report: dict) -> str:
         )
 
     if metrics:
+        onsets = metrics.get("onsets") or {}
         lines += [
             "",
             f"envelope correlation : {metrics['envelope_correlation']:.3f}",
             f"spectral correlation : {metrics['spectral_correlation']:.3f}",
             f"rms ratio (gb/nes)   : {metrics['rms_ratio']:.3f}",
         ]
+        if onsets.get("reference"):
+            lines.append(
+                f"percussive attacks   : {onsets['matched']}/{onsets['reference']} "
+                f"kept ({onsets['recall']:.2f})"
+            )
+
+    dpcm = report["dpcm"]
+    if dpcm["rom_bytes"] or dpcm["hits"]:
+        lines += ["", f"DPCM ({dpcm['preset']}): {dpcm['strategy']}"]
+        if dpcm["hits"]:
+            layered = f" (+{dpcm['layers']} layered)" if dpcm["layers"] else ""
+            lines.append(
+                f"  {dpcm['placed']}/{dpcm['hits']} hits re-synthesised{layered}"
+                f"; hosts {dpcm['per_host'] or '-'}"
+            )
+            if dpcm["preempted_frames"]:
+                lines.append(
+                    f"  frames taken from the original arrangement: "
+                    f"{dpcm['preempted_frames']}"
+                )
+        for sample in dpcm["samples"]:
+            flag = " (forced)" if sample["overridden"] else ""
+            lines.append(
+                f"  {sample['address']} {sample['length']:>4}B "
+                f"{sample['duration_ms']:>6.1f}ms x{sample['hits']:<3} -> "
+                f"{sample['role']:<8}{flag} conf {sample['confidence']:.2f}"
+            )
+            lines.append(f"      why: {', '.join(sample['why']) or 'no rule matched'}")
+            if sample["recipe"]:
+                lines.append(f"      plays: {sample['recipe']} on {', '.join(sample['hosts'])}")
 
     if report["noise_mapping_cents"]:
         mapping = ", ".join(
@@ -221,4 +409,46 @@ def render_text(report: dict) -> str:
         lines += ["", "warnings:"]
         lines += [f"  - {warning}" for warning in report["warnings"]]
 
+    return "\n".join(lines)
+
+
+VARIANT_COLUMNS = (
+    ("preset", 9),
+    ("bytes", 8),
+    ("hits", 9),
+    ("attacks", 9),
+    ("envelope", 9),
+    ("spectral", 9),
+)
+
+
+def render_variant_table(results: list[ConversionResult]) -> str:
+    """Compare the strategies side by side.
+
+    Deliberately not ranked. The numbers say how closely each variant resembles
+    a chip the Game Boy is not; they cannot say which one is the better piece of
+    music. That judgement is the listener's.
+    """
+    header = " ".join(f"{name:>{width}}" for name, width in VARIANT_COLUMNS)
+    lines = ["DPCM strategies (listen before choosing; the numbers only measure",
+             "resemblance to a different chip, not whether it sounds good)", "", header]
+    for result in results:
+        metrics = result.report.get("metrics") or {}
+        onsets = metrics.get("onsets") or {}
+        dpcm = result.report["dpcm"]
+        hits = f"{dpcm['placed']}/{dpcm['hits']}" if dpcm["hits"] else "-"
+        attacks = f"{onsets['recall']:.3f}" if onsets.get("reference") else "-"
+        lines.append(
+            " ".join(
+                [
+                    f"{result.preset:>9}",
+                    f"{len(result.payload):>8}",
+                    f"{hits:>9}",
+                    f"{attacks:>9}",
+                    f"{metrics.get('envelope_correlation', 0.0):>9.3f}",
+                    f"{metrics.get('spectral_correlation', 0.0):>9.3f}",
+                ]
+            )
+        )
+        lines.append(f"{'':>9} {dpcm['strategy']}")
     return "\n".join(lines)

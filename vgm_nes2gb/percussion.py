@@ -68,6 +68,12 @@ class Recipe:
     wave: tuple[int, ...] | None = None
     amplitude: float = 1.0
     description: str = ""
+    pitch_hz: float = 0.0
+    """The note this recipe sounds, or 0 when it has no pitch at all.
+
+    Noise has none, and that is exactly what makes it safe to drop anywhere: it
+    cannot be out of tune with the part that is already playing.
+    """
 
     @property
     def needs_wave_ram(self) -> bool:
@@ -231,6 +237,7 @@ def _kick_square(analysis: SampleAnalysis, host: Host, tick_hz: float) -> Recipe
             f"{'swept' if sweep else 'plain'} square from {start_hz:.0f} Hz "
             f"over {body * 1000:.0f} ms"
         ),
+        pitch_hz=pitch,
     )
 
 
@@ -308,6 +315,7 @@ def _snare_body(analysis: SampleAnalysis, host: Host, tick_hz: float) -> Recipe:
         ),
         amplitude=f.amplitude * 0.5,
         description=f"square body layer over {body * 1000:.0f} ms",
+        pitch_hz=max(gb.SQUARE_MIN_HZ, min(f.centroid_hz * 0.5, 1200.0)),
     )
 
 
@@ -372,6 +380,7 @@ def _tom_wave(analysis: SampleAnalysis, tick_hz: float) -> Recipe:
         wave=table,
         amplitude=f.amplitude,
         description=f"wave tom at {pitch:.0f} Hz ringing over {body * 1000:.0f} ms",
+        pitch_hz=pitch,
     )
 
 
@@ -399,6 +408,7 @@ def _tonal_wave(analysis: SampleAnalysis, tick_hz: float, held_seconds: float) -
         wave=table,
         amplitude=f.amplitude,
         description=f"wave note at {pitch:.0f} Hz with a timbre from the sample",
+        pitch_hz=pitch,
     )
 
 
@@ -420,6 +430,7 @@ def _tonal_square(analysis: SampleAnalysis, host: Host, tick_hz: float, held_sec
         ),
         amplitude=f.amplitude,
         description=f"square note at {pitch:.0f} Hz",
+        pitch_hz=pitch,
     )
 
 

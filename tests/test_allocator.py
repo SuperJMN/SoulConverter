@@ -498,5 +498,54 @@ class TomRecipeTests(unittest.TestCase):
         self.assertEqual(levels, sorted(levels))
 
 
+class RegisterClashTests(unittest.TestCase):
+    """An idle channel is not the same thing as an idle register.
+
+    A kick rebuilt as a low square is a note, whatever it is called. Dropped
+    onto a free pulse channel while the triangle is walking a bass line under
+    it, it does not sound like a drum that found room - it sounds like the bass
+    playing a wrong note, because that is what the ear does with two square-ish
+    tones a semitone apart. Noise cannot be out of tune, so it is where a low
+    hit belongs when the register is taken.
+    """
+
+    def _plan(self, background, preset="balanced"):
+        rom, layout = testing.dpcm_kit()
+        address, length = layout["kick"]
+        frames = [[(0x15, 0x0F), (0x17, 0x40)]]
+        for _ in range(3):
+            frames.append(list(background) + testing.dpcm_trigger(address, length))
+            _pad(frames, 29)
+        timeline, parsed = _timeline(frames, rom)
+        return allocator.plan(timeline, parsed, preset=preset)
+
+    def _hosts(self, plan):
+        return {voice.host for voice in plan.voices if voice.layer_of is None}
+
+    def test_a_low_hit_keeps_its_preferred_pulse_when_the_register_is_clear(self):
+        plan = self._plan([])
+
+        self.assertIn(Host.CH1, self._hosts(plan))
+
+    def test_the_same_hit_moves_to_noise_when_a_bass_line_owns_that_register(self):
+        plan = self._plan(testing.triangle_note(180.0))
+
+        self.assertEqual(self._hosts(plan), {Host.CH4})
+
+    def test_a_part_far_above_the_hit_is_not_treated_as_a_clash(self):
+        """Masking is about proximity, not about any note existing at all."""
+        plan = self._plan(testing.pulse_note(1, 1500.0, volume=8, duty=2))
+
+        self.assertIn(Host.CH1, self._hosts(plan))
+
+    def test_a_reinforcing_layer_is_dropped_rather_than_sit_on_the_bass(self):
+        """A layer is a luxury, so any clash at all is enough to refuse it."""
+        clear = self._plan([], preset="full")
+        crowded = self._plan(testing.triangle_note(180.0), preset="full")
+
+        self.assertGreater(clear.stats.layers, 0)
+        self.assertEqual(crowded.stats.layers, 0)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

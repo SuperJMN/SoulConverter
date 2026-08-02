@@ -177,7 +177,13 @@ class _WaveChannel:
     ) -> None:
         if not state.playing:
             if self.active:
-                registers.set(gb.NR30, 0x00)
+                # Silence with the output level, not the DAC. Clearing NR30
+                # disconnects the DAC and drops the output from wherever the
+                # wave happened to be to nothing, which pops - and the NES
+                # triangle rests between almost every note, so that pop lands
+                # on the bass line dozens of times a song. NR32 = 0 mutes the
+                # same channel without moving the DAC.
+                registers.set(gb.NR32, 0x00)
                 self.active = False
             return
 

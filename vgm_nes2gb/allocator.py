@@ -18,6 +18,7 @@ Two invariants hold throughout:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from .dpcm import Role, SampleAnalysis, analyze_all
@@ -66,6 +67,26 @@ _SUSTAINED_NOISE_RATIO = 0.8
 # cost overrules timbre. Roughly the price of a frame of a quiet note: enough to
 # keep preference in charge when the difference is marginal.
 PREFERENCE_TOLERANCE = 0.15
+
+# How close two voices must be, in semitones, before the new one is heard as
+# fighting the old rather than accompanying it. A fifth is the classical line:
+# inside it two square-ish tones beat and mask each other, outside it they read
+# as separate registers. A kick rebuilt at 183 Hz against a bass at 196 Hz is
+# 1.2 semitones away - the same note, out of tune.
+CLASH_SEMITONES = 12.0
+
+# What a full clash costs per frame. It has to exceed PREFERENCE_TOLERANCE on
+# its own, or a preferred host would still win the tie-break while stepping on
+# the bass; and it has to stay under the price of interrupting a real note, so
+# that avoiding a clash never justifies silencing someone.
+CLASH_WEIGHT = 0.6
+
+# How far either side of a hit the register still counts as occupied. Hearing
+# groups events that are close in time and in pitch into one stream, so a low
+# square struck in the gap between two bass notes is not heard as a drum that
+# got away with it - it is heard as a wrong note in the bass line. Four frames
+# is about 66 ms, the span over which that grouping happens.
+CLASH_CONTEXT_FRAMES = 4
 
 
 @dataclass(frozen=True)
@@ -216,6 +237,7 @@ class _Occupancy:
     attack: dict[Host, list[bool]]
     burst: dict[Host, list[int]]
     decorative: list[bool] = field(default_factory=list)
+    pitches: list[dict[Host, float]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.decorative:
@@ -227,6 +249,7 @@ class _Occupancy:
     def measure(cls, timeline: ApuTimeline) -> "_Occupancy":
         volume: dict[Host, list[float]] = {host: [] for host in Host}
         attack: dict[Host, list[bool]] = {host: [] for host in Host}
+        pitches: list[dict[Host, float]] = []
         for tick in timeline.ticks:
             states = {
                 Host.CH1: tick.pulse1,
@@ -234,6 +257,7 @@ class _Occupancy:
                 Host.CH3: tick.triangle,
                 Host.CH4: tick.noise,
             }
+            sounding: dict[Host, float] = {}
             for host, state in states.items():
                 playing = bool(getattr(state, "playing", False))
                 level = getattr(state, "volume", None)
@@ -244,9 +268,20 @@ class _Occupancy:
                     loudness = (level / 15.0) if playing else 0.0
                 volume[host].append(loudness)
                 attack[host].append(bool(getattr(state, "retriggered", False)) and playing)
+                if playing and host is not Host.CH4:
+                    hz = float(getattr(state, "frequency_hz", 0.0) or 0.0)
+                    if hz > 0.0:
+                        sounding[host] = hz
+            pitches.append(sounding)
         burst = {host: cls._burst_lengths(volume[host]) for host in Host}
         decorative = cls._decorative_noise(volume[Host.CH4], burst[Host.CH4])
-        return cls(volume=volume, attack=attack, burst=burst, decorative=decorative)
+        return cls(
+            volume=volume,
+            attack=attack,
+            burst=burst,
+            decorative=decorative,
+            pitches=pitches,
+        )
     @staticmethod
     def _burst_lengths(levels: list[float]) -> list[int]:
         """For each tick, how many consecutive ticks its sounding run lasts."""
@@ -321,6 +356,40 @@ class _Occupancy:
         that second. Comparing rates puts both sides in the same units.
         """
         return self.cost(host, start, frames) / max(1, frames)
+
+    def clash(self, pitch_hz: float, host: Host, start: int, frames: int) -> float:
+        """What it costs to put a note into a register another part is using.
+
+        An idle channel is not the same as an idle register. Masking and beating
+        happen between frequencies, not between channels, so a kick rebuilt as a
+        swept square lands on top of a bass line playing the same notes even
+        though nothing was interrupted to make room for it - and two square-ish
+        voices a semitone apart do not sound like a drum and a bass, they sound
+        like a mistake.
+
+        The host's own part is excluded: it is being replaced, not competed
+        with. Noise has no pitch and therefore cannot clash, which is the whole
+        reason it stays the safe host for percussion.
+
+        The worst moment sets the price, not the average one. A beat between two
+        close tones is heard the instant it happens; spreading it over the
+        frames that were clean would price a clearly audible collision as if it
+        were half of one.
+        """
+        if pitch_hz <= 0.0 or not self.pitches:
+            return 0.0
+        first = max(0, start - CLASH_CONTEXT_FRAMES)
+        last = min(start + frames + CLASH_CONTEXT_FRAMES, len(self.pitches))
+        worst = 0.0
+        for tick in range(first, last):
+            for other_host, other in self.pitches[tick].items():
+                if other_host is host:
+                    continue
+                distance = abs(12.0 * math.log2(pitch_hz / other))
+                if distance >= CLASH_SEMITONES:
+                    continue
+                worst = max(worst, 1.0 - distance / CLASH_SEMITONES)
+        return CLASH_WEIGHT * worst
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +518,14 @@ def _place(
         frames = max(1, min(recipe.frames, room))
         if _conflicts(result, recipe.host, tick, frames):
             continue
-        priced.append((recipe, frames, occupancy.rate(recipe.host, tick, frames)))
+        priced.append(
+            (
+                recipe,
+                frames,
+                occupancy.rate(recipe.host, tick, frames)
+                + occupancy.clash(recipe.pitch_hz, recipe.host, tick, frames),
+            )
+        )
     if not priced:
         return None
 
@@ -486,7 +562,8 @@ def _add_layer(
     """Reinforce a hit on a second channel when one happens to be free.
 
     A layer is a luxury, so it is only taken when it costs nothing at all: it
-    must never be the reason a melodic note goes missing.
+    must never be the reason a melodic note goes missing, and never the reason
+    a bass note has a drum sitting on its register.
     """
     for recipe in options:
         if recipe.host is primary.host:
@@ -495,6 +572,8 @@ def _add_layer(
         if _conflicts(result, recipe.host, tick, frames):
             continue
         if occupancy.cost(recipe.host, tick, frames) > 0.0:
+            continue
+        if occupancy.clash(recipe.pitch_hz, recipe.host, tick, frames) > 0.0:
             continue
         result.voices.append(
             ScheduledVoice(

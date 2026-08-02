@@ -134,6 +134,53 @@ def registers_of(tick) -> dict[int, int]:
     return dict(tick.writes)
 
 
+class BassRestTests(unittest.TestCase):
+    """How CH3 goes quiet between notes, which on the DMG is not a free choice.
+
+    Clearing NR30 disconnects the wave DAC, and the output jumps from wherever
+    the wave happened to be to nothing. That is the DMG's well-known wave-channel
+    pop, and the NES triangle rests between almost every note, so choosing the
+    DAC to rest with puts a click on the bass line dozens of times a song.
+    Muting through NR32 leaves the DAC alone.
+    """
+
+    def _writes(self):
+        ticks = [
+            ApuTick(
+                index=index,
+                sample=index * 735,
+                pulse1=PulseState(),
+                pulse2=PulseState(),
+                triangle=TriangleState(**note),
+                noise=NoiseState(),
+            )
+            for index, note in enumerate(
+                [
+                    {"playing": True, "frequency_hz": 165.0},
+                    {},
+                    {"playing": True, "frequency_hz": 196.0, "retriggered": True},
+                    {},
+                ]
+            )
+        ]
+        return [registers_of(tick) for tick in nes_to_gb.convert(timeline_from(ticks)).ticks]
+
+    def test_a_rest_does_not_touch_the_dac(self):
+        rests = self._writes()
+
+        self.assertNotIn(gb.NR30, rests[1])
+        self.assertNotIn(gb.NR30, rests[3])
+
+    def test_a_rest_is_silent_all_the_same(self):
+        self.assertEqual(self._writes()[1][gb.NR32], 0x00)
+
+    def test_the_next_note_comes_back_at_full_level(self):
+        resumed = self._writes()[2]
+
+        self.assertEqual(resumed[gb.NR32], 0x20)
+        self.assertTrue(resumed[gb.NR34] & 0x80)
+
+
 class ChannelMappingTests(unittest.TestCase):
     def test_duty_maps_one_to_one(self):
         for duty in range(4):

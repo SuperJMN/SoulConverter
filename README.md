@@ -221,6 +221,46 @@ Dos invariantes se cumplen siempre:
   Y ninguna nota puede durar más que su propia muestra, salvo que el original la
   hiciera bucle.
 
+### Un canal libre no es un registro libre
+
+Que un canal esté callado no significa que quepa cualquier cosa en él. El
+enmascaramiento y la disonancia ocurren **entre frecuencias, no entre canales**:
+un bombo reconstruido como cuadrada barrida de 403 a 183 Hz es, se llame como se
+llame, una nota grave. Puesto en un pulse libre mientras el triángulo camina el
+bajo a 196 Hz, no se oye como un tambor que encontró sitio; se oye como el bajo
+tocando una nota falsa, porque eso es lo que hace el oído con dos tonos cuadrados
+a un semitono.
+
+Así que además del coste de expropiación se cobra un **coste de registro**: un
+candidato con tono paga por acercarse a menos de una octava de otra voz que esté
+sonando, y paga el peor instante, no la media —un batido se oye en cuanto ocurre,
+diluirlo entre los frames limpios lo abarataría—. La ventana se extiende cuatro
+frames a cada lado del golpe, porque el oído agrupa por cercanía en el tiempo y
+un golpe grave metido en el hueco entre dos notas del bajo sigue leyéndose como
+parte del bajo. Se excluye la voz del propio canal anfitrión: a esa se la
+sustituye, no se compite con ella.
+
+El ruido no tiene tono y por eso no puede desafinar con nadie: eso es lo que lo
+convierte en el sitio natural de un golpe grave cuando el registro está ocupado.
+El refuerzo en un segundo canal, que es un lujo, se descarta ante cualquier
+choque por pequeño que sea.
+
+Es el mismo error de siempre en otra magnitud: el modelo medía ocupación de canal
+cuando el fenómeno es de banda.
+
+### El bajo descansa sin chasquear
+
+El triángulo del NES calla entre casi todas las notas, y en el Game Boy hay dos
+formas de callar el canal wave. Apagar el DAC (`NR30`) desconecta la salida y la
+tira desde donde estuviera la onda hasta nada: es el *pop* clásico del canal wave
+del DMG. Bajar el nivel de salida a cero (`NR32`) deja el DAC en paz.
+
+Elegir el DAC ponía un chasquido en cada silencio del bajo —27 apagados y 27
+encendidos en un tema de medio minuto—. Ahora sólo se toca el DAC cuando hay que
+recargar la wave RAM, que es cuando no queda más remedio. El sintetizador de
+referencia trataba las dos formas igual, así que ninguna métrica lo veía: es un
+hecho del hardware, y se arregla por lo que hace el hardware.
+
 ### Resultado sobre material real
 
 El BGM del runner de RetroSharp: 60 disparos, 4 muestras distintas.
@@ -229,8 +269,8 @@ El BGM del runner de RetroSharp: 60 disparos, 4 muestras distintas.
    preset    bytes      hits   attacks  envelope  spectral
       off    13226      0/60     0.778     0.555     0.982
      safe    13754     59/60     0.822     0.693     0.986
- balanced    14135     59/60     0.830     0.717     0.984
-     full    14498     59/60     0.837     0.733     0.982
+ balanced    14009     59/60     0.815     0.709     0.986
+     full    14168     59/60     0.822     0.721     0.986
 ```
 
 El golpe que falta es el blip de nivelación del DAC del driver: se descarta a
@@ -243,6 +283,14 @@ en su banda (110-170 Hz) `balanced` pasó de 703 a 1855 al reconocerlo, contra
 1889 del original. Tres golpes de sesenta no mueven una media, y aun así son lo
 primero que se echa en falta. Por eso las métricas aquí son informe y no examen.
 
+El bombo de este tema es tonal, así que hasta que se cobró el registro se metía
+en la banda del bajo: **15 de sus 23 golpes acababan en un pulse como cuadrada
+grave, y 9 sonaban encima del triángulo**, en un caso a 183 Hz contra 196 Hz, un
+semitono. Cobrando la banda quedan 5 en el pulse y **ninguno solapa con el bajo**,
+en ninguna de las tres estrategias. El exceso de energía media (250-600 Hz), que
+es donde se oía la cuadrada haciendo de bajo, baja de 1.42 a 1.34 en `balanced` y
+de 1.57 a 1.39 en `full`.
+
 El otro caso, un tema comercial cuyo DPCM es la línea de bajo (275 disparos, el
 DMC sonando el 80 % del tiempo, cuatro grabaciones tocadas a cinco velocidades):
 
@@ -250,8 +298,8 @@ DMC sonando el 80 % del tiempo, cuatro grabaciones tocadas a cinco velocidades):
    preset    bytes      hits   attacks  envelope  spectral
       off    53758     0/275     0.900     0.604     0.960
      safe    53707     2/275     0.896     0.603     0.960
- balanced    62212   239/275     0.887     0.687     0.967
-     full    63346   274/275     0.884     0.710     0.968
+ balanced    65632   231/275     0.884     0.688     0.968
+     full    66358   274/275     0.880     0.718     0.968
 ```
 
 Aquí `safe` casi no puede hacer nada, porque un bajo no cabe en el canal de
@@ -260,14 +308,15 @@ Por bandas, contra la referencia con su DPCM sonando:
 
 ```
    banda        off     safe  balanced     full
- 40-100 Hz    0.278    0.279     0.557    0.649    <- el bajo muestreado
-100-170 Hz    0.685    0.685     0.668    0.607    <- el triángulo
-170-400 Hz    0.839    0.839     0.812    0.799
-  400-1 kHz   0.870    0.870     0.856    0.847
+ 40-100 Hz    0.510    0.510     1.027    1.103    <- el bajo muestreado
+100-170 Hz    0.910    0.910     1.221    1.216    <- el triángulo
+170-400 Hz    1.175    1.175     1.350    1.377
+  400-1 kHz   1.445    1.444     1.634    1.653
 ```
 
-Es el compromiso en crudo: el bajo se recupera y el triángulo paga por ello,
-poco en `balanced` y algo más en `full`.
+El bajo muestreado pasa de faltar la mitad a estar entero. Que el resto del
+espectro se pase de largo es el precio de reconstruir con generadores lo que era
+una grabación: una cuadrada tiene más armónicos que la muestra que sustituye.
 
 ## Qué se pierde, y por qué
 

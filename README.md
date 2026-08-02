@@ -138,15 +138,37 @@ oscuro y percusivo, exactamente igual que un bombo, y por eso mirando la forma d
 onda de un golpe suelto **no se pueden distinguir**.
 
 La pista no está en el sonido, está en el arreglo: *nadie transpone un bombo*.
-El DMC sólo tiene un mando de tono —el divisor de reloj—, así que una misma
-dirección disparada a tres velocidades distintas o más, con tono medible, es una
-escala. Esa comprobación necesita ver el tema entero, no la muestra, así que vive
-en el análisis global y no en las reglas.
+El DMC sólo tiene un mando de tono —el divisor de reloj—, así que **cuántas
+afinaciones distintas usa el driver mide cuánto le importa el tono al
+compositor**. Eso da una gradación:
 
-En cuanto una muestra pasa esa prueba deja de ser percusión y se toca como lo que
-es: una nota real, al tono que le toca, con una onda derivada de la propia
-grabación en el canal wave. En el tema medido (275 disparos, 80 % del tema con el
-DMC sonando) eso sube la correlación en la banda de 40-100 Hz de 0.28 a 0.65.
+| Afinaciones de una misma muestra | Qué es | Cómo se toca |
+|---|---|---|
+| una | un tambor fijo | bombo, caja o charles |
+| dos, separadas ≥2 semitonos | un tambor **afinado** | la afinación principal sigue siendo el pulso; las desviaciones son timbales |
+| tres o más | un **instrumento** | notas reales al tono que les toca |
+
+Esa comprobación necesita ver el tema entero, no la muestra, así que vive en el
+análisis global y no en las reglas.
+
+El escalón del medio importa más de lo que parece. El *Overworld* de Super Mario
+Bros. 3 toca su muestra de bombo una cuarta más grave durante tres golpes: es un
+redoble de timbal, y el oyente lo echa de menos si no está. Aisladas, las dos
+variantes son la misma grabación, miden idéntico y puntúan idéntico (bombo 6.5,
+timbal 4.5 las dos), así que ninguna regla sobre la forma de onda puede
+separarlas. Sólo el arreglo lo dice.
+
+Y hay que tocarlo como lo que es: un bombo de chiptune **barre** el tono hacia
+abajo, que es justo lo que lo hace sonar a bombo — y justo lo que borra la
+afinación de un timbal. Un timbal mantiene su tono y **resuena**: la muestra de
+Mario 3 sigue al 16 % de su pico después de un cuarto de segundo, y recortada a
+su transitorio es un clic. Se reconstruye en el canal wave, con el timbre sacado
+de la propia grabación y el volumen bajando a mano por la cola, porque ese canal
+no tiene envolvente por hardware.
+
+En cuanto una muestra pasa la prueba melódica deja de ser percusión y se toca
+como una nota real. En el tema medido (275 disparos, 80 % del tema con el DMC
+sonando) eso sube la correlación en la banda de 40-100 Hz de 0.28 a 0.65.
 
 Un efecto lateral: las notas más graves de un instrumento transpuesto caen por
 debajo del suelo de detección de tono. Se recupera heredando el tono de una
@@ -206,15 +228,20 @@ El BGM del runner de RetroSharp: 60 disparos, 4 muestras distintas.
 ```
    preset    bytes      hits   attacks  envelope  spectral
       off    13226      0/60     0.778     0.555     0.982
-     safe    13754     59/60     0.822     0.688     0.986
- balanced    13943     59/60     0.837     0.704     0.984
-     full    14306     59/60     0.837     0.721     0.982
+     safe    13754     59/60     0.822     0.693     0.986
+ balanced    14135     59/60     0.830     0.717     0.984
+     full    14498     59/60     0.837     0.733     0.982
 ```
 
 El golpe que falta es el blip de nivelación del DAC del driver: se descarta a
 propósito. Ninguna de las tres estrategias activas roba un solo frame de
 melodía en este tema. **La tabla ordena por parecido a otro chip, no por lo bien
 que suena: elige de oído.**
+
+Las cifras globales no lo enseñan, pero el redoble de timbal del compás 15 sí:
+en su banda (110-170 Hz) `balanced` pasó de 703 a 1855 al reconocerlo, contra
+1889 del original. Tres golpes de sesenta no mueven una media, y aun así son lo
+primero que se echa en falta. Por eso las métricas aquí son informe y no examen.
 
 El otro caso, un tema comercial cuyo DPCM es la línea de bajo (275 disparos, el
 DMC sonando el 80 % del tiempo, cuatro grabaciones tocadas a cinco velocidades):

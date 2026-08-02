@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+import math
+from collections import Counter
 
 import numpy as np
 
@@ -494,11 +496,13 @@ def analyze_all(
 
     overrides = overrides or {}
     out: dict[SampleRef, SampleAnalysis] = {}
+    plays: Counter[SampleRef] = Counter()
     for ref in refs:  # type: ignore[union-attr]
+        plays[ref] += 1
         if ref in out:
             continue
         out[ref] = analyze(rom, ref, role_override=overrides.get(ref.address))
-    return _apply_song_context(out)
+    return _apply_song_context(out, plays)
 
 
 # The DMC rate is the only knob that transposes a sample, so a driver that plays
@@ -508,9 +512,16 @@ _MELODIC_RATE_COUNT = 3
 _MELODIC_PITCH_CONFIDENCE = 0.5
 _PERCUSSIVE_ROLES = (Role.KICK, Role.SNARE, Role.HAT, Role.TOM)
 
+# Below the melodic threshold there is still something to hear: a drum retuned
+# for a fill is a pitched drum. Two semitones is about where a listener stops
+# hearing "the same drum" and starts hearing "a different one".
+_TUNED_DRUM_SEMITONES = 2.0
+_TUNED_DRUM_PITCH_CONFIDENCE = 0.5
+
 
 def _apply_song_context(
     analyses: dict[SampleRef, SampleAnalysis],
+    plays: Counter[SampleRef] | None = None,
 ) -> dict[SampleRef, SampleAnalysis]:
     """Re-read percussion verdicts in the light of how the song uses the sample.
 
@@ -533,8 +544,6 @@ def _apply_song_context(
 
     out: dict[SampleRef, SampleAnalysis] = dict(analyses)
     for address, refs in by_address.items():
-        if len(refs) < _MELODIC_RATE_COUNT:
-            continue
         if any(analyses[ref].overridden for ref in refs):
             continue
         if not any(analyses[ref].role in _PERCUSSIVE_ROLES for ref in refs):
@@ -542,7 +551,12 @@ def _apply_song_context(
         # The median rather than the best: one lucky reading is not evidence
         # that a whole drum sample is really an instrument.
         confidences = sorted(analyses[ref].features.pitch_confidence for ref in refs)
-        if confidences[len(confidences) // 2] < _MELODIC_PITCH_CONFIDENCE:
+        median_confidence = confidences[len(confidences) // 2]
+
+        if len(refs) < _MELODIC_RATE_COUNT:
+            _retune_drums(out, analyses, refs, median_confidence, plays or Counter())
+            continue
+        if median_confidence < _MELODIC_PITCH_CONFIDENCE:
             continue
 
         anchor = max(refs, key=lambda r: analyses[r].features.pitch_confidence)
@@ -563,6 +577,58 @@ def _apply_song_context(
                 reasons=(reason, f"isolated verdict was {analysis.role.value}"),
             )
     return out
+
+
+def _retune_drums(
+    out: dict[SampleRef, SampleAnalysis],
+    analyses: dict[SampleRef, SampleAnalysis],
+    refs: list[SampleRef],
+    median_confidence: float,
+    plays: Counter[SampleRef],
+) -> None:
+    """Hear a drum that was deliberately retuned as a different drum.
+
+    Short of a full scale there is still a musical decision in the arrangement:
+    a driver that plays the kick sample a fourth down for three hits in a bar is
+    playing a tom fill, and the composer meant those hits to sound different.
+    Isolated classification cannot see it - both variants are the same recording,
+    so they measure identically and score identically - and it is audible, since
+    a kick substitute sweeps its pitch away while a tom holds it.
+
+    The most-used tuning keeps its verdict: that one is the beat, and rebuilding
+    it as a pitched drum would cost the song its punch. Only the departures are
+    re-read, which is exactly what the departure was for.
+    """
+    if len(refs) < 2 or median_confidence < _TUNED_DRUM_PITCH_CONFIDENCE:
+        return
+    tuned = [ref for ref in refs if analyses[ref].role in (Role.KICK, Role.SNARE, Role.TOM)]
+    if len(tuned) < 2:
+        return
+
+    home = max(tuned, key=lambda r: (plays[r], analyses[r].features.pitch_confidence))
+    home_pitch = analyses[home].features.pitch_hz
+    if home_pitch <= 0.0:
+        return
+
+    for ref in tuned:
+        if ref is home or analyses[ref].role is Role.TOM:
+            continue
+        pitch = analyses[ref].features.pitch_hz
+        if pitch <= 0.0:
+            continue
+        semitones = abs(12.0 * math.log2(pitch / home_pitch))
+        if semitones < _TUNED_DRUM_SEMITONES:
+            continue
+        analysis = analyses[ref]
+        out[ref] = replace(
+            analysis,
+            role=Role.TOM,
+            reasons=(
+                f"the song retunes this drum {semitones:.0f} semitones for these "
+                f"hits: a pitched drum, not another {analysis.role.value}",
+                f"isolated verdict was {analysis.role.value}",
+            ),
+        )
 
 
 def _borrow_pitch(analysis: SampleAnalysis, anchor: SampleAnalysis) -> SampleFeatures:

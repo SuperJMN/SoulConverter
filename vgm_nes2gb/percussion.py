@@ -337,24 +337,41 @@ def _hat_noise(analysis: SampleAnalysis, tick_hz: float) -> Recipe:
 
 
 def _tom_wave(analysis: SampleAnalysis, tick_hz: float) -> Recipe:
+    """A tom as a pitched wave note that rings and decays.
+
+    Two things separate a tom from the kick recipe, and the sample only sounds
+    like a tom when both are present. Its pitch has to be audible, so there is
+    no sweep - a sweep is what makes a square read as a kick in the first place.
+    And it has to ring: the sample this is built from is still at a sixth of its
+    peak after a quarter of a second, and a drum truncated to its transient is
+    just a click.
+
+    CH3 has no envelope generator, only four output levels, so the decay is
+    stepped down by hand across the tail.
+    """
     f = analysis.features
-    body = max(0.04, min(f.effective_duration, 0.30))
+    # The whole recording, not just its loud head: the tail is the resonance,
+    # and the resonance is the instrument.
+    body = max(0.04, min(analysis.decoded.duration_seconds, 0.30))
     pitch = f.pitch_hz if f.pitch_hz > 0 else 220.0
     period, _ = gb.wave_period(pitch)
     table = tuple(wave_table(analysis))
+    frames = _frames(body, tick_hz)
+    writes = dict(
+        _wave_writes(period=period, level=1, length_seconds=body, wave=table)
+    )
+    for step, level in ((0.35, 2), (0.65, 3)):
+        frame = int(frames * step)
+        if frame > 0:
+            writes[frame] = ((gb.NR32, (level & 3) << 5),)
     return Recipe(
         host=Host.CH3,
         role=Role.TOM,
-        frames=_frames(body, tick_hz),
-        writes=_wave_writes(
-            period=period,
-            level=1,
-            length_seconds=body,
-            wave=table,
-        ),
+        frames=frames,
+        writes=writes,
         wave=table,
         amplitude=f.amplitude,
-        description=f"wave tom at {pitch:.0f} Hz over {body * 1000:.0f} ms",
+        description=f"wave tom at {pitch:.0f} Hz ringing over {body * 1000:.0f} ms",
     )
 
 
@@ -471,7 +488,8 @@ def candidates(
     elif analysis.role is Role.TOM:
         if allow_tonal_hosts:
             out.append(_tom_wave(analysis, tick_hz))
-            out.append(_kick_square(analysis, Host.CH1, tick_hz))
+        # Not the kick recipe as a fallback: its sweep erases the pitch that
+        # made this a tom rather than a kick. Noise keeps the attack instead.
         out.append(_snare_noise(analysis, tick_hz))
     elif analysis.role is Role.TONAL:
         if allow_tonal_hosts:

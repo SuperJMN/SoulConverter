@@ -285,9 +285,40 @@ class SongContextTests(unittest.TestCase):
 
         self.assertEqual(analyses[refs[0]].role, Role.KICK)
 
-    def test_a_drum_pitched_down_once_is_still_a_drum(self):
-        """Two rates is a normal and a low variant, which is how kits are used."""
+    def test_a_drum_pitched_down_once_is_not_an_instrument(self):
+        """Two rates is a drum retuned, not a melody: it stays percussion.
+
+        Real material draws the line here. Super Mario Bros. 3 plays its kick
+        sample a fourth down for a three-hit fill, and those hits are a tom -
+        audibly a different drum - but the sample is never used to carry a part.
+        """
         analyses, refs = self._analyses([14, 15])
+
+        for ref in refs:
+            with self.subTest(rate=ref.rate_index):
+                self.assertNotEqual(analyses[ref].role, Role.TONAL)
+                self.assertTrue(analyses[ref].role.is_percussive)
+
+    def test_the_beat_keeps_its_verdict_and_the_departure_is_re_read(self):
+        """Only the retuned hits change: rebuilding the beat would cost punch."""
+        analyses, refs = self._analyses([14, 15, 15, 15])
+        low, home = refs[0], refs[1]
+
+        self.assertEqual(analyses[home].role, Role.KICK)
+        self.assertEqual(analyses[low].role, Role.TOM)
+        self.assertIn("retunes this drum", " ".join(analyses[low].reasons))
+
+    def test_a_drum_retuned_by_less_than_a_tone_is_the_same_drum(self):
+        """Rates 10 and 11 are 1.8 semitones apart: no audible decision."""
+        analyses, refs = self._analyses([10, 11, 11, 11])
+
+        for ref in refs:
+            with self.subTest(rate=ref.rate_index):
+                self.assertEqual(analyses[ref].role, Role.KICK)
+
+    def test_retuning_something_with_no_pitch_proves_nothing_either(self):
+        """A real kit has no measurable pitch, so nothing to compare."""
+        analyses, refs = self._analyses([14, 15, 15, 15], testing.synth_kick())
 
         for ref in refs:
             with self.subTest(rate=ref.rate_index):

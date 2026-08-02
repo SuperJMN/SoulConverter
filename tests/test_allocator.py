@@ -450,5 +450,53 @@ def _bass_kit():
     return {0xC000: payload}, {"bass": (0xC000, len(payload))}
 
 
+class TomRecipeTests(unittest.TestCase):
+    """A drum the driver retuned has to come out sounding retuned.
+
+    The kick substitute sweeps its pitch downward, which is exactly what makes a
+    square read as a kick - and exactly what makes a tom inaudible as a tom. If
+    a tom is rebuilt with a sweep, or truncated to its transient, the three-hit
+    fill it belongs to disappears into the beat.
+    """
+
+    def setUp(self):
+        rom, layout = _bass_kit()
+        address, length = layout["bass"]
+        frames = [[(0x15, 0x0F), (0x17, 0x40)]]
+        for rate in (15, 15, 15, 14):
+            frames.append(testing.dpcm_trigger(address, length, rate_index=rate))
+            _pad(frames, 59)
+        self.timeline, self.rom = _timeline(frames, rom)
+        self.plan = allocator.plan(self.timeline, self.rom, preset="balanced")
+        self.toms = [v for v in self.plan.voices if v.analysis.role is Role.TOM]
+
+    def test_the_retuned_hit_is_rebuilt_as_a_tom(self):
+        self.assertEqual(len(self.toms), 1)
+
+    def test_it_keeps_its_pitch_instead_of_sweeping_it_away(self):
+        writes = [w for group in self.toms[0].recipe.writes.values() for w in group]
+        registers = {register for register, _ in writes}
+
+        self.assertNotIn(gb.NR10, registers)
+        self.assertEqual(self.toms[0].host, Host.CH3)
+
+    def test_it_rings_rather_than_being_cut_to_its_transient(self):
+        """The sample is still at a sixth of its peak after a quarter second."""
+        effective = self.toms[0].analysis.features.effective_duration
+
+        self.assertGreater(self.toms[0].frames, effective * 60.0)
+
+    def test_the_ring_fades_instead_of_stopping_flat(self):
+        levels = [
+            value
+            for group in self.toms[0].recipe.writes.values()
+            for register, value in group
+            if register == gb.NR32
+        ]
+
+        self.assertGreater(len(levels), 1)
+        self.assertEqual(levels, sorted(levels))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

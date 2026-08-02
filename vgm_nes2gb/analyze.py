@@ -90,6 +90,65 @@ def _empty_pitch() -> dict:
     }
 
 
+ONSET_TOLERANCE_SECONDS = 0.035
+ONSET_HOP = 512
+
+
+def onsets(samples: np.ndarray, sample_rate: float = 44100.0) -> np.ndarray:
+    """Times where the spectrum jumps, i.e. where a listener hears a hit.
+
+    Spectral flux rather than an amplitude jump, because a drum landing on top
+    of a sustained note barely changes the level but changes the spectrum a lot.
+    """
+    if samples.size < ONSET_HOP * 4:
+        return np.zeros(0)
+    frames = samples.size // ONSET_HOP
+    block = samples[: frames * ONSET_HOP].reshape(frames, ONSET_HOP)
+    spectrum = np.abs(np.fft.rfft(block * np.hanning(ONSET_HOP), axis=1))
+    flux = np.diff(spectrum, axis=0)
+    strength = np.clip(flux, 0, None).sum(axis=1)
+    if not strength.size or strength.max() <= 0:
+        return np.zeros(0)
+    threshold = strength.mean() + strength.std()
+    peaks = [
+        index
+        for index in range(1, strength.size - 1)
+        if strength[index] > threshold
+        and strength[index] >= strength[index - 1]
+        and strength[index] > strength[index + 1]
+    ]
+    return np.array(peaks, dtype=float) * ONSET_HOP / sample_rate
+
+
+def onset_match(
+    nes_audio: np.ndarray, gb_audio: np.ndarray, sample_rate: float = 44100.0
+) -> dict:
+    """How many of the source's audible hits survive, and how punctually.
+
+    Diagnostic only. Two different chips cannot produce the same attack, so a
+    low score is a prompt to listen, never a reason to fail a conversion.
+    """
+    reference = onsets(nes_audio, sample_rate)
+    produced = onsets(gb_audio, sample_rate)
+    if reference.size == 0:
+        return {"reference": 0, "produced": int(produced.size), "matched": 0, "recall": 0.0}
+
+    remaining = list(produced)
+    matched = 0
+    for time in reference:
+        for index, candidate in enumerate(remaining):
+            if abs(candidate - time) <= ONSET_TOLERANCE_SECONDS:
+                matched += 1
+                remaining.pop(index)
+                break
+    return {
+        "reference": int(reference.size),
+        "produced": int(produced.size),
+        "matched": matched,
+        "recall": round(matched / reference.size, 3),
+    }
+
+
 def compare(
     nes_audio: np.ndarray,
     gb_audio: np.ndarray,
@@ -109,6 +168,7 @@ def compare(
         "nes_rms": nes_rms,
         "gb_rms": gb_rms,
         "rms_ratio": (gb_rms / nes_rms) if nes_rms > 0 else 0.0,
+        "onsets": onset_match(nes_audio, gb_audio),
         "channels": {
             name: _pitch_stats(
                 nes_frequencies.get(name, np.zeros(0)),

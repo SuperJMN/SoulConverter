@@ -5,3 +5,7 @@ out/
 *.png
 .venv/
 .pytest_cache/
+entrega/
+*.vgz
+*.vgm
+!tests/**/*.vgm

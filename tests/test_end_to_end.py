@@ -184,6 +184,56 @@ class SilentSourceTests(unittest.TestCase):
         self.assertTrue(np.all(np.abs(result.gb_audio) < 1e-6))
 
 
+class DrumFixture(unittest.TestCase):
+    """The demo song that also has a sampled drum kit, converted both ways."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.mkdtemp(prefix="vgm-nes2gb-drums-")
+        cls.source = os.path.join(cls.directory, "drums.vgm")
+        with open(cls.source, "wb") as handle:
+            handle.write(testing.dpcm_demo_vgm())
+        cls.off = converter.convert_file(cls.source, dpcm="off")
+        cls.full = converter.convert_file(cls.source, dpcm="full")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.directory, ignore_errors=True)
+
+
+class DpcmPipelineTests(DrumFixture):
+    def test_the_reference_render_plays_the_samples_the_nes_played(self):
+        """Without this the comparison flatters the conversion: no drums, no gap."""
+        plain = converter.convert_file(self.source, dpcm="off")
+        self.assertGreater(float(np.abs(plain.nes_audio).max()), 0.0)
+        self.assertGreater(
+            self.off.report["dpcm"]["hits"], 0, "the fixture lost its drums"
+        )
+
+    def test_re_synthesised_drums_land_on_the_beats_the_samples_did(self):
+        before = self.off.report["metrics"]["onsets"]["recall"]
+        after = self.full.report["metrics"]["onsets"]["recall"]
+
+        self.assertGreater(after, before)
+
+    def test_dropping_the_sample_channel_is_reported_rather_than_hidden(self):
+        text = converter.render_text(self.off.report).lower()
+        self.assertIn("dpcm", text)
+
+    def test_the_drums_are_audible_in_the_game_boy_render(self):
+        quiet = float(np.abs(self.off.gb_audio).mean())
+        loud = float(np.abs(self.full.gb_audio).mean())
+
+        self.assertGreater(loud, quiet)
+
+    def test_both_versions_remain_importable(self):
+        allowed = {"0x61", "0x62", "0x63", "0x66", "0x67", "0xB3"}
+        for result in (self.off, self.full):
+            with self.subTest(preset=result.preset):
+                self.assertEqual(result.payload[:4], b"Vgm ")
+                self.assertTrue(set(result.report["output"]["commands"]) <= allowed)
+
+
 class ReportTests(ConversionFixture):
     def test_the_report_names_the_source_and_the_settings(self):
         report = self.result.report

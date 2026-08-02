@@ -6,13 +6,15 @@ shapes and note-offs. This module instead runs those units and samples the
 resulting *musical* state (pitch, volume, duty, on/off) on a fixed tick grid.
 The Game Boy side is then re-synthesised from that state.
 
-DMC/DPCM registers never reach this model; the reader drops them.
+The DMC is modelled too, but only as far as *which* sample is playing and when.
+Its waveform is not a musical state the Game Boy can reproduce; turning it into
+something the DMG can play is the job of :mod:`vgm_nes2gb.dpcm`.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from .vgm_reader import VGM_SAMPLE_RATE, NesCommandStream
 
@@ -26,6 +28,11 @@ NOISE_PERIOD_TABLE = (
     4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068,
 )
 
+# NTSC DMC output rates, in CPU cycles per output bit, indexed by $4010 low nibble.
+DMC_RATE_TABLE = (
+    428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54,
+)
+
 # Frame sequencer step boundaries in CPU cycles, and what each step clocks.
 # 'q' clocks envelopes and the linear counter, 'h' clocks lengths and sweeps.
 SEQUENCE_4STEP = ((7457, "q"), (14913, "qh"), (22371, "q"), (29829, "qh"))
@@ -36,6 +43,10 @@ SEQUENCE_5STEP = (
 SEQUENCE_5STEP_LENGTH = 37282
 
 DEFAULT_TICK_HZ = 60.0
+
+# The DMC rate table is NTSC-specific, so its output rates are too. A PAL rip
+# would need its own table; this converter targets NTSC.
+NTSC_CPU_HZ = 1789773.0
 
 
 @dataclass(frozen=True)
@@ -71,6 +82,43 @@ class NoiseState:
 
 
 @dataclass(frozen=True)
+class SampleRef:
+    """Identifies one DPCM sample: where it lives and how fast it plays."""
+
+    address: int
+    length: int
+    rate_index: int
+
+    @property
+    def rate_hz(self) -> float:
+        return NTSC_CPU_HZ / DMC_RATE_TABLE[self.rate_index]
+
+    @property
+    def duration_seconds(self) -> float:
+        return self.length * 8 / self.rate_hz
+
+    @property
+    def label(self) -> str:
+        return f"{self.address:04X}:{self.length}@{self.rate_index}"
+
+
+@dataclass(frozen=True)
+class DmcState:
+    """What the sample channel is doing on one tick.
+
+    The DMC is monophonic, so there is at most one of these in flight, which is
+    what makes re-synthesis tractable: only one Game Boy channel has to be found.
+    """
+
+    playing: bool = False
+    sample: SampleRef | None = None
+    started: bool = False
+    elapsed_seconds: float = 0.0
+    looping: bool = False
+    direct_level: int = 0
+
+
+@dataclass(frozen=True)
 class ApuTick:
     index: int
     sample: int
@@ -78,6 +126,7 @@ class ApuTick:
     pulse2: PulseState
     triangle: TriangleState
     noise: NoiseState
+    dmc: DmcState = field(default_factory=DmcState)
 
 
 @dataclass
@@ -267,6 +316,89 @@ class _Noise:
             self.length -= 1
 
 
+class _Dmc:
+    """The sample channel, tracked as note-on/note-off rather than as audio.
+
+    Which sample plays and when is all the Game Boy side can act on: the actual
+    delta-modulated waveform has no DMG equivalent. The unit therefore keeps the
+    sample identity and a cycle-accurate end time, and nothing else.
+    """
+
+    def __init__(self) -> None:
+        self.enabled = False
+        self.rate_index = 0
+        self.looping = False
+        self.direct_level = 0
+        self.address_byte = 0
+        self.length_byte = 0
+        self.playing = False
+        self.started = False
+        self.start_cycle = 0
+        self.end_cycle = 0
+        self.current: SampleRef | None = None
+
+    def write(self, index: int, value: int) -> None:
+        if index == 0:
+            self.looping = bool(value & 0x40)
+            self.rate_index = value & 0x0F
+        elif index == 1:
+            self.direct_level = value & 0x7F
+        elif index == 2:
+            self.address_byte = value
+        elif index == 3:
+            self.length_byte = value
+
+    def set_enabled(self, enabled: bool, cycle: int) -> None:
+        """`$4015` bit 4: clearing it silences the channel, setting it restarts.
+
+        The hardware only restarts a sample when the bit goes from clear to set,
+        or when a running sample has already finished; writing the bit again
+        mid-sample does not retrigger.
+        """
+        self.enabled = enabled
+        if not enabled:
+            self.playing = False
+            self.current = None
+            return
+        if self.playing:
+            return
+        self._restart(cycle)
+
+    def _restart(self, cycle: int) -> None:
+        length = self.length_byte * 16 + 1
+        sample = SampleRef(
+            address=0xC000 + self.address_byte * 64,
+            length=length,
+            rate_index=self.rate_index,
+        )
+        self.current = sample
+        self.playing = True
+        self.started = True
+        self.start_cycle = cycle
+        self.end_cycle = cycle + int(length * 8 * DMC_RATE_TABLE[self.rate_index])
+
+    def run_to_cycle(self, cycle: int) -> None:
+        while self.playing and cycle >= self.end_cycle:
+            if self.looping and self.enabled:
+                self._restart(self.end_cycle)
+                continue
+            self.playing = False
+            self.current = None
+
+    def state(self, cycle: int) -> DmcState:
+        elapsed = 0.0
+        if self.playing and self.current is not None:
+            elapsed = max(0, cycle - self.start_cycle) / NTSC_CPU_HZ
+        return DmcState(
+            playing=self.playing,
+            sample=self.current,
+            started=self.started,
+            elapsed_seconds=elapsed,
+            looping=self.looping,
+            direct_level=self.direct_level,
+        )
+
+
 class NesApu:
     """Register-write driven model of the 2A03 sound units."""
 
@@ -276,6 +408,7 @@ class NesApu:
         self.pulse2 = _Pulse(is_pulse1=False)
         self.triangle = _Triangle()
         self.noise = _Noise()
+        self.dmc = _Dmc()
         self.cycle = 0
         self._sequence_cycle = 0
         self._step = 0
@@ -291,11 +424,14 @@ class NesApu:
             self.triangle.write(register - 0x08, value)
         elif register <= 0x0F:
             self.noise.write(register - 0x0C, value)
+        elif register <= 0x13:
+            self.dmc.write(register - 0x10, value)
         elif register == 0x15:
             self.pulse1.set_enabled(bool(value & 0x01))
             self.pulse2.set_enabled(bool(value & 0x02))
             self.triangle.set_enabled(bool(value & 0x04))
             self.noise.set_enabled(bool(value & 0x08))
+            self.dmc.set_enabled(bool(value & 0x10), self.cycle)
         elif register == 0x17:
             self._five_step = bool(value & 0x80)
             self._sequence_cycle = 0
@@ -306,6 +442,7 @@ class NesApu:
 
     # -- timing -------------------------------------------------------------
     def run_to_cycle(self, cycle: int) -> None:
+        self.dmc.run_to_cycle(cycle)
         while self.cycle < cycle:
             steps, total = (
                 (SEQUENCE_5STEP, SEQUENCE_5STEP_LENGTH)
@@ -353,11 +490,13 @@ class NesApu:
             pulse2=self._pulse_state(self.pulse2),
             triangle=self._triangle_state(),
             noise=self._noise_state(),
+            dmc=self.dmc.state(self.cycle),
         )
         self.pulse1.retriggered = False
         self.pulse2.retriggered = False
         self.triangle.retriggered = False
         self.noise.retriggered = False
+        self.dmc.started = False
         return tick
 
     def _pulse_state(self, pulse: _Pulse) -> PulseState:

@@ -17,8 +17,9 @@ from __future__ import annotations
 import os
 import unittest
 
-from vgm_nes2gb import converter, gb_vgm_writer
+from vgm_nes2gb import analyze, converter, gb_vgm_writer, nes_apu, vgm_reader
 from vgm_nes2gb.nes_to_gb import VOLUME_MODE_ENVELOPE
+from vgm_nes2gb.render import gb_synth, nes_synth
 
 SAMPLE_ENV = "VGM_NES2GB_SAMPLES"
 DEFAULT_SAMPLES = (
@@ -70,8 +71,56 @@ class RealThemeTests(unittest.TestCase):
                     delta=0.1,
                 )
                 self.assertGreater(report["metrics"]["gb_rms"], 0.005)
-                self.assertGreater(report["metrics"]["envelope_correlation"], 0.7)
                 self.assertGreater(report["metrics"]["spectral_correlation"], 0.9)
+
+    def test_the_tonal_part_matches_once_the_drums_are_out_of_the_way(self):
+        """With no DPCM on either side, the four mapped channels line up closely.
+
+        The default ``off`` preset drops the sample channel, so comparing against
+        a reference that still plays it would charge the conversion for a
+        difference it was told to make. Silencing the DPCM in the reference too
+        isolates what this test is actually about.
+        """
+        for path in SAMPLES:
+            with self.subTest(theme=os.path.basename(path)):
+                stream = vgm_reader.parse(path)
+                timeline = nes_apu.simulate(stream)
+                result = converter.convert_file(path)
+                reference = nes_synth.render(timeline)
+                metrics = analyze.compare(
+                    reference,
+                    result.gb_audio,
+                    nes_synth.channel_frequencies(timeline),
+                    gb_synth.channel_frequencies(result.payload, timeline.tick_hz),
+                )
+                self.assertGreater(metrics["envelope_correlation"], 0.7)
+
+    def test_resynthesised_drums_restore_the_missing_attacks(self):
+        """Every preset that plays the DPCM keeps more hits than dropping it.
+
+        This is the whole point of the feature, and it is the one comparison the
+        metrics can make honestly: the reference includes the sample channel, so
+        an absent drum shows up as a missing attack.
+        """
+        for path in SAMPLES:
+            with self.subTest(theme=os.path.basename(path)):
+                results = {r.preset: r for r in converter.convert_variants(path)}
+                if not results["off"].report["dpcm"]["rom_bytes"]:
+                    self.skipTest("theme has no DPCM samples")
+                baseline = results["off"].report["metrics"]["onsets"]["recall"]
+                for preset in ("safe", "balanced", "full"):
+                    report = results[preset].report
+                    self.assertGreaterEqual(
+                        report["metrics"]["onsets"]["recall"], baseline
+                    )
+                    self.assertGreater(report["dpcm"]["placed"], 0)
+                    self.assertTrue(
+                        gb_vgm_writer.scan_commands(results[preset].payload)
+                        <= gb_vgm_writer.ALLOWED_COMMANDS
+                    )
+                self.assertGreater(
+                    results["full"].report["metrics"]["onsets"]["recall"], baseline
+                )
 
     def test_tonal_channels_keep_their_pitch_class(self):
         for path in SAMPLES:

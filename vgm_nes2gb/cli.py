@@ -8,6 +8,8 @@ import os
 import sys
 
 from . import converter, testing
+from .allocator import DEFAULT_PRESET, PRESETS
+from .dpcm import Role
 from .nes_apu import DEFAULT_TICK_HZ
 from .nes_to_gb import VOLUME_MODES, VOLUME_MODE_RETRIGGER
 from .render import wav
@@ -49,6 +51,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-transpose",
         action="store_true",
         help="clamp notes below the Game Boy range instead of raising them an octave",
+    )
+    convert.add_argument(
+        "--dpcm",
+        choices=list(PRESETS),
+        default=DEFAULT_PRESET,
+        help=(
+            "how to handle the NES sample channel, which the Game Boy lacks. "
+            + "; ".join(f"{name}: {preset.description}" for name, preset in PRESETS.items())
+            + " (default: %(default)s)"
+        ),
+    )
+    convert.add_argument(
+        "--variants",
+        action="store_true",
+        help=(
+            "write one file per DPCM strategy plus a comparison table, because no "
+            "single strategy wins on every song and no metric can tell which sounds best"
+        ),
+    )
+    convert.add_argument(
+        "--dpcm-role",
+        action="append",
+        metavar="ADDR=ROLE",
+        default=[],
+        help=(
+            "override the classifier for one sample, e.g. 0xEA80=kick. Roles: "
+            + ", ".join(role.value for role in Role)
+        ),
+    )
+    convert.add_argument(
+        "--dpcm-dump",
+        metavar="DIR",
+        help="write one WAV per distinct DPCM sample, to audit the classification",
     )
     convert.add_argument(
         "--report", metavar="DIR", help="write a JSON report per converted file"
@@ -108,14 +143,33 @@ def _run_convert(args) -> int:
 
 
 def _convert_one(source: str, destination: str, args) -> None:
-    result = converter.convert_file(
-        source,
+    roles = _parse_roles(args.dpcm_role)
+    common = dict(
         tick_hz=args.tick_hz,
         volume_mode=args.volume_mode,
         allow_transpose=not args.no_transpose,
         render_audio=True,
+        dpcm_roles=roles,
     )
 
+    if args.variants:
+        results = converter.convert_variants(source, **common)
+    else:
+        results = [converter.convert_file(source, dpcm=args.dpcm, **common)]
+
+    for result in results:
+        path = _variant_path(destination, result.preset) if args.variants else destination
+        _emit(result, path, args)
+
+    if args.dpcm_dump:
+        _dump_samples(source, args.dpcm_dump, roles, quiet=args.quiet)
+
+    if args.variants and not args.quiet:
+        print(converter.render_variant_table(results))
+        print()
+
+
+def _emit(result, destination: str, args) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(destination)) or ".", exist_ok=True)
     with open(destination, "wb") as handle:
         handle.write(result.payload)
@@ -141,6 +195,56 @@ def _convert_one(source: str, destination: str, args) -> None:
     if not args.quiet:
         print(converter.render_text(result.report))
         print()
+
+
+def _parse_roles(entries: list[str]) -> dict[int, Role]:
+    """Parse ``--dpcm-role 0xEA80=kick`` overrides."""
+    roles: dict[int, Role] = {}
+    for entry in entries:
+        if "=" not in entry:
+            raise ValueError(f"--dpcm-role expects ADDR=ROLE, got {entry!r}")
+        address, _, name = entry.partition("=")
+        try:
+            roles[int(address, 0)] = Role(name.strip().lower())
+        except ValueError as error:
+            raise ValueError(
+                f"--dpcm-role {entry!r}: expected an address and one of "
+                + ", ".join(role.value for role in Role)
+            ) from error
+    return roles
+
+
+def _dump_samples(source: str, directory: str, roles: dict[int, Role], quiet: bool = False) -> None:
+    """Write one WAV per distinct sample so the classification can be checked by ear."""
+    from . import dpcm as dpcm_module
+    from . import nes_apu, vgm_reader
+
+    os.makedirs(directory, exist_ok=True)
+    stream = vgm_reader.parse(source)
+    timeline = nes_apu.simulate(stream)
+    refs = [
+        tick.dmc.sample
+        for tick in timeline.ticks
+        if tick.dmc.started and tick.dmc.sample is not None
+    ]
+    for ref, analysis in dpcm_module.analyze_all(
+        stream.dpcm_rom, refs, overrides=roles
+    ).items():
+        # The rate is part of the identity: the same bytes played slower are a
+        # different sound, and the runner really does play its kick both ways.
+        name = f"{ref.address:04X}_{ref.length}_r{ref.rate_index}_{analysis.role.value}.wav"
+        wav.write_wav(
+            os.path.join(directory, name),
+            analysis.decoded.waveform,
+            sample_rate=int(analysis.decoded.rate_hz),
+        )
+        if not quiet:
+            print(f"wrote {os.path.join(directory, name)}")
+
+
+def _variant_path(destination: str, preset: str) -> str:
+    stem = _sidecar_stem(destination)
+    return _sibling(destination, f"{stem}.{preset}{OUTPUT_SUFFIX}")
 
 
 def _sidecar_stem(destination: str) -> str:

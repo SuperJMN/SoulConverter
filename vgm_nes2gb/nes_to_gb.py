@@ -21,6 +21,8 @@ VOLUME_MODES = (VOLUME_MODE_RETRIGGER, VOLUME_MODE_ENVELOPE)
 
 CHANNEL_NAMES = ("pulse1", "pulse2", "triangle", "noise")
 
+TRIGGER_REGISTERS = frozenset({gb.NR14, gb.NR24, gb.NR34, gb.NR44})
+
 
 @dataclass
 class GbTick:
@@ -38,6 +40,8 @@ class MappingStats:
     active_ticks: dict[str, int] = field(default_factory=dict)
     noise_error_cents: dict[int, float] = field(default_factory=dict)
     register_writes: int = 0
+    dpcm_voices: int = 0
+    dpcm_restores: int = 0
 
     def __post_init__(self) -> None:
         for name in CHANNEL_NAMES:
@@ -246,8 +250,14 @@ def convert(
     volume_mode: str = VOLUME_MODE_RETRIGGER,
     allow_transpose: bool = True,
     wave_nibbles=gb.TRIANGLE_WAVE_NIBBLES,
+    dpcm_plan=None,
 ) -> GbTimeline:
-    """Turn an :class:`ApuTimeline` into Game Boy register writes per tick."""
+    """Turn an :class:`ApuTimeline` into Game Boy register writes per tick.
+
+    When ``dpcm_plan`` is given, the channels it borrows are left alone for the
+    span of each borrowed voice and restored the tick after, so the NES part
+    resumes exactly where it was interrupted.
+    """
     if volume_mode not in VOLUME_MODES:
         raise ValueError(f"unknown volume mode {volume_mode!r}")
 
@@ -257,15 +267,39 @@ def convert(
     pulse2 = _SquareChannel("pulse2", gb.NR21, gb.NR22, gb.NR23, gb.NR24)
     wave = _WaveChannel()
     noise = _NoiseChannel()
+    channels = {"ch1": pulse1, "ch2": pulse2, "ch3": wave, "ch4": noise}
 
     ticks: list[GbTick] = []
     for index, apu_tick in enumerate(timeline.ticks):
         if index == 0:
             _emit_init(registers, wave_nibbles)
-        pulse1.update(apu_tick.pulse1, registers, stats, volume_mode, allow_transpose)
-        pulse2.update(apu_tick.pulse2, registers, stats, volume_mode, allow_transpose)
-        wave.update(apu_tick.triangle, registers, stats, allow_transpose)
-        noise.update(apu_tick.noise, registers, stats, volume_mode)
+
+        borrowed: set[str] = set()
+        if dpcm_plan is not None:
+            for host in dpcm_plan.released_at(index):
+                _release_host(host.value, channels, registers, wave_nibbles, stats)
+            borrowed = dpcm_plan.borrowed_at(index)
+
+        if "ch1" not in borrowed:
+            pulse1.update(apu_tick.pulse1, registers, stats, volume_mode, allow_transpose)
+        if "ch2" not in borrowed:
+            pulse2.update(apu_tick.pulse2, registers, stats, volume_mode, allow_transpose)
+        if "ch3" not in borrowed:
+            wave.update(apu_tick.triangle, registers, stats, allow_transpose)
+        if "ch4" not in borrowed:
+            noise.update(apu_tick.noise, registers, stats, volume_mode)
+
+        if dpcm_plan is not None:
+            for voice in dpcm_plan.starting_at(index):
+                channels[voice.host.value].active = False
+                for register, value in voice.recipe.writes.get(0, ()):
+                    # Trigger bits self-clear on the hardware; remembering them
+                    # would make the next tick re-emit the register just to
+                    # drop a bit that is no longer set.
+                    remember = value & ~0x80 if register in TRIGGER_REGISTERS else None
+                    registers.force(register, value, remember=remember)
+                stats.dpcm_voices += 1
+
         writes = registers.drain()
         stats.register_writes += len(writes)
         ticks.append(GbTick(index=index, sample=apu_tick.sample, writes=writes))
@@ -277,6 +311,37 @@ def convert(
         total_samples=timeline.total_samples,
         stats=stats,
     )
+
+
+def _release_host(
+    name: str,
+    channels: dict,
+    registers: _RegisterFile,
+    wave_nibbles,
+    stats: MappingStats,
+) -> None:
+    """Hand a borrowed channel back in a state the NES part can resume from.
+
+    Clearing ``active`` is what forces the next tick to re-emit the whole note
+    rather than trusting delta compression, but two pieces of state outlive a
+    trigger and have to be undone by hand: CH1's sweep would detune the next
+    note it plays, and CH3's wave RAM would leave the triangle with a drum's
+    timbre.
+    """
+    channel = channels[name]
+    channel.active = False
+    stats.dpcm_restores += 1
+    if name == "ch1":
+        registers.set(gb.NR10, 0x00)
+        registers.set(gb.NR12, 0x00)
+    elif name == "ch2":
+        registers.set(gb.NR22, 0x00)
+    elif name == "ch3":
+        registers.force(gb.NR30, 0x00)
+        for offset, byte in enumerate(gb.pack_wave(wave_nibbles)):
+            registers.set(gb.WAVE_RAM_BASE + offset, byte)
+    elif name == "ch4":
+        registers.set(gb.NR42, 0x00)
 
 
 def _emit_init(registers: _RegisterFile, wave_nibbles) -> None:

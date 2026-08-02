@@ -167,6 +167,7 @@ class _WaveChannel:
 
     def __init__(self) -> None:
         self.active = False
+        self.started = False
 
     def update(
         self,
@@ -195,7 +196,17 @@ class _WaveChannel:
             )
         stats.active_ticks[self.name] += 1
 
-        note_on = not self.active or state.retriggered
+        # Start the channel once and then leave it running. Triggering CH3
+        # rewinds wave RAM to its first sample, which is the top of the
+        # triangle, so the output jumps there from wherever it was: a click. The
+        # NES triangle has no such thing - its sequencer runs on through note
+        # changes and through rests, which is exactly why the part sounds
+        # smooth. $400B does set the NES retrigger flag, but it reloads the
+        # linear counter, not the phase, so carrying that flag over here
+        # mistranslates it into an attack the original never had. Coming back
+        # from a rest needs no trigger either: nothing disabled the channel, its
+        # level was simply turned down.
+        note_on = not self.started
         registers.set(gb.NR30, 0x80)
         registers.set(gb.NR32, 0x20)  # 100% output level
         registers.set(gb.NR33, period & 0xFF)
@@ -207,6 +218,7 @@ class _WaveChannel:
         else:
             registers.set(gb.NR34, high)
         self.active = True
+        self.started = True
 
 
 class _NoiseChannel:
@@ -346,6 +358,9 @@ def _release_host(
         registers.force(gb.NR30, 0x00)
         for offset, byte in enumerate(gb.pack_wave(wave_nibbles)):
             registers.set(gb.WAVE_RAM_BASE + offset, byte)
+        # Reloading wave RAM means cycling the DAC, which disables the channel,
+        # so the bass does need a fresh trigger here - unlike an ordinary rest.
+        channel.started = False
     elif name == "ch4":
         registers.set(gb.NR42, 0x00)
 

@@ -250,16 +250,39 @@ cuando el fenómeno es de banda.
 
 ### El bajo descansa sin chasquear
 
-El triángulo del NES calla entre casi todas las notas, y en el Game Boy hay dos
-formas de callar el canal wave. Apagar el DAC (`NR30`) desconecta la salida y la
-tira desde donde estuviera la onda hasta nada: es el *pop* clásico del canal wave
-del DMG. Bajar el nivel de salida a cero (`NR32`) deja el DAC en paz.
+El triángulo del NES calla entre casi todas las notas y cambia de nota sin
+articular: su secuenciador **no se reinicia nunca**, y eso es justo lo que hace
+que la línea de bajo suene continua. Traducir eso al Game Boy tiene dos trampas,
+y la conversión caía en las dos.
 
-Elegir el DAC ponía un chasquido en cada silencio del bajo —27 apagados y 27
-encendidos en un tema de medio minuto—. Ahora sólo se toca el DAC cuando hay que
-recargar la wave RAM, que es cuando no queda más remedio. El sintetizador de
-referencia trataba las dos formas igual, así que ninguna métrica lo veía: es un
-hecho del hardware, y se arregla por lo que hace el hardware.
+La primera: `$400B` marca el triángulo como "re-disparado", pero lo que recarga
+es el contador lineal, **no la fase**. Traducirlo a un disparo de `NR34` sí
+reinicia la wave RAM del Game Boy, que vuelve a su primera muestra —el pico del
+triángulo—, así que la salida salta ahí desde donde estuviera: un clic en cada
+nota. Ahora CH3 se arranca una vez y no se vuelve a disparar; los cambios de nota
+escriben el periodo y nada más.
+
+La segunda: para callar se apagaba el DAC (`NR30`), que es el *pop* clásico del
+canal wave del DMG. Ahora se baja el nivel de salida a cero (`NR32`), que silencia
+sin mover el DAC — y como nada deshabilita el canal, volver de un silencio
+tampoco necesita disparo. En un tema de medio minuto: **de 51 disparos y 27
+apagados de DAC a 1 y 1**.
+
+Medido sobre el bajo aislado, contra el triángulo del NES aislado:
+
+```
+   banda        antes    ahora
+  250-500 Hz    1.13     0.99
+ 500-1000 Hz    1.21     1.03
+   1-2 kHz      1.52     1.14   <- los clics vivían aquí
+   2-5 kHz      1.37     1.12
+```
+
+El fundamental nunca estuvo mal (1.00 y 1.02): lo que sobraba era el ataque que
+el original no tenía. El sintetizador de referencia reiniciaba la fase igual que
+el hardware, pero trataba las dos formas de callar como equivalentes, así que
+ninguna métrica global lo veía: sólo aparece al aislar el canal y compararlo con
+su original.
 
 ### Resultado sobre material real
 
@@ -267,10 +290,10 @@ El BGM del runner de RetroSharp: 60 disparos, 4 muestras distintas.
 
 ```
    preset    bytes      hits   attacks  envelope  spectral
-      off    13226      0/60     0.778     0.555     0.982
-     safe    13754     59/60     0.822     0.693     0.986
- balanced    14009     59/60     0.815     0.709     0.986
-     full    14168     59/60     0.822     0.721     0.986
+      off    13109      0/60     0.763     0.555     0.982
+     safe    13637     59/60     0.830     0.693     0.986
+ balanced    13895     59/60     0.822     0.709     0.986
+     full    14054     59/60     0.830     0.721     0.986
 ```
 
 El golpe que falta es el blip de nivelación del DAC del driver: se descarta a
@@ -296,10 +319,10 @@ DMC sonando el 80 % del tiempo, cuatro grabaciones tocadas a cinco velocidades):
 
 ```
    preset    bytes      hits   attacks  envelope  spectral
-      off    53758     0/275     0.900     0.604     0.960
-     safe    53707     2/275     0.896     0.603     0.960
- balanced    65632   231/275     0.884     0.688     0.968
-     full    66358   274/275     0.880     0.718     0.968
+      off    52699     0/275     0.891     0.605     0.960
+     safe    52648     2/275     0.887     0.604     0.960
+ balanced    65131   231/275     0.875     0.689     0.968
+     full    65914   274/275     0.868     0.719     0.968
 ```
 
 Aquí `safe` casi no puede hacer nada, porque un bajo no cabe en el canal de

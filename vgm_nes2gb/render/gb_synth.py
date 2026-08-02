@@ -113,11 +113,6 @@ class GameBoyApu:
             self.enabled[1] = False
         if register == 0x0A and not value & 0x80:
             self.enabled[2] = False
-        if register == 0x0C and not value & 0x60:
-            # NR32 level 0 is silence, exactly as a zeroed envelope is on the
-            # other three channels. CH3 rests this way rather than by clearing
-            # its DAC, which would pop.
-            self.enabled[2] = False
         if register == 0x11 and (value & 0xF8) == 0:
             self.enabled[3] = False
         if register == 0x04 and value & 0x80:
@@ -125,7 +120,7 @@ class GameBoyApu:
         elif register == 0x09 and value & 0x80:
             self._trigger(1, 0x07)
         elif register == 0x0E and value & 0x80:
-            if self.registers[0x0A] & 0x80 and self.registers[0x0C] & 0x60:
+            if self.registers[0x0A] & 0x80:
                 self.enabled[2] = True
                 self.phases[2] = 0.0
         elif register == 0x13 and value & 0x80:
@@ -268,6 +263,12 @@ def channel_frequencies(payload: bytes, tick_hz: float) -> dict[str, np.ndarray]
         series["pulse2"][tick] = (
             apu.square_frequency(0x08, 0x09) if apu.enabled[1] else 0.0
         )
-        series["triangle"][tick] = apu.wave_frequency() if apu.enabled[2] else 0.0
+        series["triangle"][tick] = (
+            # CH3 rests at output level 0 rather than by being disabled, so a
+            # running channel turned all the way down is not sounding a note.
+            apu.wave_frequency()
+            if apu.enabled[2] and apu.registers[0x0C] & 0x60
+            else 0.0
+        )
         series["noise"][tick] = apu.noise_rate()[0] if apu.enabled[3] else 0.0
     return series

@@ -175,10 +175,25 @@ class BassRestTests(unittest.TestCase):
         self.assertEqual(self._writes()[1][gb.NR32], 0x00)
 
     def test_the_next_note_comes_back_at_full_level(self):
+        self.assertEqual(self._writes()[2][gb.NR32], 0x20)
+
+    def test_the_next_note_is_not_retriggered(self):
+        """A trigger rewinds wave RAM to the top of the triangle: a click.
+
+        Nothing disabled the channel during the rest, so nothing has to restart
+        it - and the NES triangle's own sequencer runs straight through, which
+        is why the part sounds continuous there.
+        """
         resumed = self._writes()[2]
 
-        self.assertEqual(resumed[gb.NR32], 0x20)
-        self.assertTrue(resumed[gb.NR34] & 0x80)
+        self.assertFalse(resumed.get(gb.NR34, 0) & 0x80)
+
+    def test_the_channel_is_started_exactly_once(self):
+        triggers = [
+            written for written in self._writes() if written.get(gb.NR34, 0) & 0x80
+        ]
+
+        self.assertEqual(len(triggers), 1)
 
 
 class ChannelMappingTests(unittest.TestCase):

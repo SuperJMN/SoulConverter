@@ -336,6 +336,7 @@ class _Dmc:
         self.start_cycle = 0
         self.end_cycle = 0
         self.current: SampleRef | None = None
+        self.last_started: SampleRef | None = None
 
     def write(self, index: int, value: int) -> None:
         if index == 0:
@@ -372,6 +373,7 @@ class _Dmc:
             rate_index=self.rate_index,
         )
         self.current = sample
+        self.last_started = sample
         self.playing = True
         self.started = True
         self.start_cycle = cycle
@@ -389,9 +391,15 @@ class _Dmc:
         elapsed = 0.0
         if self.playing and self.current is not None:
             elapsed = max(0, cycle - self.start_cycle) / NTSC_CPU_HZ
+        # A one-byte sample starts and finishes inside the same tick. It still
+        # started, so reporting the trigger without naming what was triggered
+        # would leave the consumer with an event it cannot look up.
+        sample = self.current if self.current is not None else (
+            self.last_started if self.started else None
+        )
         return DmcState(
             playing=self.playing,
-            sample=self.current,
+            sample=sample,
             started=self.started,
             elapsed_seconds=elapsed,
             looping=self.looping,

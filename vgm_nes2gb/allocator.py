@@ -33,14 +33,17 @@ HOST_TO_NES = {
 }
 
 # What it costs, per frame of full-volume playing, to silence each channel.
-# Noise is cheap because on the NES it is decoration; the triangle is dear
-# because it usually carries the bass line and because restoring CH3 means
-# reloading wave RAM, which clicks.
+# The triangle is dear because it usually carries the bass line and because
+# restoring CH3 means reloading wave RAM, which clicks. Noise is *not* cheap by
+# default: a sustained noise run at full volume is a deliberate voice. What
+# makes the NES noise channel affordable is that it nearly always plays
+# decoration, and that is priced separately by DECORATIVE_NOISE_DISCOUNT -
+# discounting it twice would leave real noise parts unprotected.
 CHANNEL_WEIGHT = {
     Host.CH1: 1.0,
     Host.CH2: 1.0,
     Host.CH3: 1.4,
-    Host.CH4: 0.22,
+    Host.CH4: 1.0,
 }
 
 # Cutting a note that starts inside the borrowed span loses the whole note, not
@@ -55,6 +58,14 @@ ATTACK_PENALTY = 1.6
 # does play lands exactly on the beats the drums need.
 DECORATIVE_NOISE_FRAMES = 2
 DECORATIVE_NOISE_DISCOUNT = 0.1
+# A noise run that ends this close to its own peak was held on purpose; one that
+# ends quieter was struck and left to fade, which is percussion.
+_SUSTAINED_NOISE_RATIO = 0.8
+
+# How much dearer than the cheapest option the best-sounding host may be before
+# cost overrules timbre. Roughly the price of a frame of a quiet note: enough to
+# keep preference in charge when the difference is marginal.
+PREFERENCE_TOLERANCE = 0.15
 
 
 @dataclass(frozen=True)
@@ -98,9 +109,9 @@ PRESETS: dict[str, Preset] = {
         enabled=True,
         allow_tonal_hosts=True,
         allow_layers=False,
-        allow_melodic_dpcm=False,
+        allow_melodic_dpcm=True,
         boldness=1.0,
-        description="percussion on noise, plus a tonal channel when it is idle",
+        description="drums and sampled bass on a tonal channel where one is free enough",
     ),
     "full": Preset(
         name="full",
@@ -204,6 +215,13 @@ class _Occupancy:
     volume: dict[Host, list[float]]
     attack: dict[Host, list[bool]]
     burst: dict[Host, list[int]]
+    decorative: list[bool] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.decorative:
+            self.decorative = self._decorative_noise(
+                self.volume[Host.CH4], self.burst[Host.CH4]
+            )
 
     @classmethod
     def measure(cls, timeline: ApuTimeline) -> "_Occupancy":
@@ -227,8 +245,8 @@ class _Occupancy:
                 volume[host].append(loudness)
                 attack[host].append(bool(getattr(state, "retriggered", False)) and playing)
         burst = {host: cls._burst_lengths(volume[host]) for host in Host}
-        return cls(volume=volume, attack=attack, burst=burst)
-
+        decorative = cls._decorative_noise(volume[Host.CH4], burst[Host.CH4])
+        return cls(volume=volume, attack=attack, burst=burst, decorative=decorative)
     @staticmethod
     def _burst_lengths(levels: list[float]) -> list[int]:
         """For each tick, how many consecutive ticks its sounding run lasts."""
@@ -250,11 +268,36 @@ class _Occupancy:
             start += length
         return out
 
+    @staticmethod
+    def _decorative_noise(levels: list[float], bursts: list[int]) -> list[bool]:
+        """Which noise runs are percussive decoration rather than a real part.
+
+        The distinction is audible and the NES writes it down: a run that fades
+        from its attack is a hit, and a hit is masked by the DPCM stroke landing
+        on top of it. A run held at a steady level is somebody playing the noise
+        channel, and taking it away would be heard as a missing part. Runs of a
+        frame or two are decoration whatever their shape, because nothing
+        sustained fits in 33 ms.
+        """
+        out = [False] * len(levels)
+        start = 0
+        while start < len(levels):
+            length = bursts[start]
+            if length <= 0:
+                start += 1
+                continue
+            run = levels[start : start + length]
+            faded = run[-1] < _SUSTAINED_NOISE_RATIO * max(run)
+            if length <= DECORATIVE_NOISE_FRAMES or faded:
+                for offset in range(length):
+                    out[start + offset] = True
+            start += length
+        return out
+
     def cost(self, host: Host, start: int, frames: int) -> float:
         weight = CHANNEL_WEIGHT[host]
         levels = self.volume[host]
         attacks = self.attack[host]
-        bursts = self.burst[host]
         total = 0.0
         for tick in range(start, min(start + frames, len(levels))):
             level = levels[tick]
@@ -263,10 +306,21 @@ class _Occupancy:
             frame_cost = level * weight
             if attacks[tick]:
                 frame_cost += level * weight * ATTACK_PENALTY
-            if host is Host.CH4 and bursts[tick] <= DECORATIVE_NOISE_FRAMES:
+            if host is Host.CH4 and self.decorative[tick]:
                 frame_cost *= DECORATIVE_NOISE_DISCOUNT
             total += frame_cost
         return total
+
+    def rate(self, host: Host, start: int, frames: int) -> float:
+        """Cost per frame held, which is what a benefit per hit compares against.
+
+        ``cost`` integrates over the frames a voice occupies, so a long note is
+        expensive simply for being long. Weighed against a benefit that does not
+        grow with duration, no sustained note could ever be afforded - which is
+        wrong, because a bass note that plays for a second is also *giving* for
+        that second. Comparing rates puts both sides in the same units.
+        """
+        return self.cost(host, start, frames) / max(1, frames)
 
 
 # ---------------------------------------------------------------------------
@@ -326,9 +380,14 @@ def plan(
             continue
 
         # The DMC could only play one sample at a time: the next hit cuts this
-        # one short, and so must its stand-in.
+        # one short, and so must its stand-in. A sample that runs out before the
+        # next hit stops there too, unless it was set to loop - holding a note
+        # through a gap the original left silent invents a sustain.
         next_tick = hits[position + 1][0] if position + 1 < len(hits) else total_ticks
         room = max(1, min(next_tick, total_ticks) - tick)
+        if not timeline.ticks[tick].dmc.looping:
+            sample_frames = analysis.decoded.duration_seconds * timeline.tick_hz
+            room = max(1, min(room, int(round(sample_frames))))
 
         options = candidates(
             analysis,
@@ -375,28 +434,32 @@ def _place(
     benefit: float,
     analysis: SampleAnalysis,
 ) -> ScheduledVoice | None:
-    """Take the first host the voice can afford, preferring the best-sounding.
+    """Take the best-sounding host the voice can afford, unless another is much cheaper.
 
-    The candidate list is already in musical preference order, so walking it and
-    stopping at the first affordable host trades fidelity for availability in
-    exactly the order the recipes intended.
+    The candidate list is in musical preference order, but taking the first
+    affordable entry means never looking at a channel sitting idle right next to
+    the one being interrupted. Percussion never noticed - its hosts nearly all
+    cost nothing, so the preferred one won anyway - but a sustained bass note
+    would evict the triangle for the whole song while a pulse channel stayed
+    silent. Preference still decides between hosts that cost about the same;
+    a clearly cheaper host overrules it.
     """
-    best: tuple[float, Recipe, int] | None = None
+    priced: list[tuple[Recipe, int, float]] = []
     for recipe in options:
         frames = max(1, min(recipe.frames, room))
-        cost = occupancy.cost(recipe.host, tick, frames)
         if _conflicts(result, recipe.host, tick, frames):
             continue
-        if cost < benefit:
-            best = (cost, recipe, frames)
-            break
-        if best is None or cost < best[0]:
-            best = (cost, recipe, frames)
-    if best is None:
+        priced.append((recipe, frames, occupancy.rate(recipe.host, tick, frames)))
+    if not priced:
         return None
-    cost, recipe, frames = best
-    if cost >= benefit:
+
+    cheapest = min(cost for _, _, cost in priced)
+    affordable = [
+        item for item in priced if item[2] < benefit and item[2] <= cheapest + PREFERENCE_TOLERANCE
+    ]
+    if not affordable:
         return None
+    recipe, frames, cost = affordable[0]
     voice = ScheduledVoice(
         tick=tick,
         frames=frames,

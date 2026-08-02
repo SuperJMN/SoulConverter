@@ -261,6 +261,7 @@ def _dpcm_section(stream, plan) -> dict:
         },
         "per_role": stats.per_role,
         "per_host": stats.per_host,
+        "preempted_frames": stats.preempted_frames,
         "samples": samples,
     }
 
@@ -381,6 +382,11 @@ def render_text(report: dict) -> str:
                 f"  {dpcm['placed']}/{dpcm['hits']} hits re-synthesised{layered}"
                 f"; hosts {dpcm['per_host'] or '-'}"
             )
+            if dpcm["preempted_frames"]:
+                lines.append(
+                    f"  frames taken from the original arrangement: "
+                    f"{dpcm['preempted_frames']}"
+                )
         for sample in dpcm["samples"]:
             flag = " (forced)" if sample["overridden"] else ""
             lines.append(

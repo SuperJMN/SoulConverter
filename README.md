@@ -57,9 +57,12 @@ Requiere Python 3.12 y `numpy`. `scipy` no es necesario. No hace falta
 | `--wav` | escribe el render del NES y el del GB para comparar de oído. |
 | `--spectrogram` | escribe un PNG con los dos espectrogramas apilados. |
 | `--dpcm off\|safe\|balanced\|full` | qué hacer con el canal de muestras. Por defecto `off`. |
-| `--variants` | genera un fichero por estrategia (`tema.off.gb.vgm`, `tema.safe.gb.vgm`, …) y una tabla comparativa. |
+| `--variants` | genera un fichero por estrategia (`tema.off.gb.vgm`, `tema.safe.gb.vgm`, …) y una tabla comparativa. Respeta la extensión que pidas: con `-o tema.vgz` salen cuatro `.vgz`. |
 | `--dpcm-role ADDR=ROL` | corrige a mano la clasificación de una muestra, p. ej. `--dpcm-role 0xEA80=kick`. Repetible. |
 | `--dpcm-dump DIR` | escribe un WAV por muestra decodificada para comprobar la clasificación de oído. |
+
+La extensión de salida decide el formato: `.vgm` sale en claro y `.vgz` sale
+**gzipeado de verdad**, que es lo único que distingue a los dos formatos.
 
 Código de salida: `0` correcto (aunque haya avisos), `2` si algún fichero de un
 lote falló, `1` si falló todo.
@@ -103,8 +106,8 @@ python3 -m vgm_nes2gb convert tema.nes.vgz -o tema.gb.vgm --variants
 |---|---|
 | `off` | descarta el DPCM (por defecto). El informe sigue diciendo qué se pierde. |
 | `safe` | percusión sólo sobre el canal de ruido. La melodía no se toca jamás. |
-| `balanced` | percusión sobre el ruido, más un canal tonal cuando está libre. |
-| `full` | además refuerza los golpes en un segundo canal y admite DPCM melódico. |
+| `balanced` | percusión sobre el ruido, y batería o bajo muestreado en un canal tonal cuando está lo bastante libre. |
+| `full` | además refuerza los golpes en un segundo canal y presta canales con más soltura. |
 
 ### Cómo decide qué es cada muestra
 
@@ -126,6 +129,30 @@ Si se equivoca, se corrige a mano con `--dpcm-role 0xE000=kick`, y el informe
 marca la muestra como corregida. Con `--dpcm-dump DIR` obtienes un WAV por
 muestra para juzgar tú.
 
+### Cuando el DPCM no es la batería sino el bajo
+
+Hay una segunda escuela de driver, la de *Journey to Silius* o *Gremlins 2*, que
+usa el canal de muestras como **instrumento melódico**: una sola grabación de
+bajo, retocada de tono cambiando la frecuencia de reproducción. Suena grave,
+oscuro y percusivo, exactamente igual que un bombo, y por eso mirando la forma de
+onda de un golpe suelto **no se pueden distinguir**.
+
+La pista no está en el sonido, está en el arreglo: *nadie transpone un bombo*.
+El DMC sólo tiene un mando de tono —el divisor de reloj—, así que una misma
+dirección disparada a tres velocidades distintas o más, con tono medible, es una
+escala. Esa comprobación necesita ver el tema entero, no la muestra, así que vive
+en el análisis global y no en las reglas.
+
+En cuanto una muestra pasa esa prueba deja de ser percusión y se toca como lo que
+es: una nota real, al tono que le toca, con una onda derivada de la propia
+grabación en el canal wave. En el tema medido (275 disparos, 80 % del tema con el
+DMC sonando) eso sube la correlación en la banda de 40-100 Hz de 0.28 a 0.65.
+
+Un efecto lateral: las notas más graves de un instrumento transpuesto caen por
+debajo del suelo de detección de tono. Se recupera heredando el tono de una
+hermana y escalándolo por la razón de velocidades, que es exacta porque el DMC es
+un divisor.
+
 La delta-modulación tiende dos trampas que costaron sangre y que conviene conocer
 si se toca el clasificador:
 
@@ -146,12 +173,31 @@ lo enmascara de todos modos. Esa segunda medición es la que hace que quepa la
 batería: en material real el canal de ruido del NES está ocupado un 5 % del tema,
 y lo poco que toca cae exactamente sobre los golpes.
 
+Se compara **coste por frame contra beneficio por frame**, y ese detalle importa
+más de lo que parece: comparar el coste acumulado de N frames contra el beneficio
+de un golpe hace que el veredicto dependa de cuánto dure la nota, así que ninguna
+nota larga podría entrar jamás. El error pasa desapercibido mientras todo lo que
+se coloca son golpes cortos y parecidos, y sale a la luz en cuanto aparece un
+bajo sostenido.
+
+Entre los canales que salen a cuenta se elige **el más barato**, no el primero
+que se pueda pagar, con un margen de tolerancia para que la preferencia de timbre
+siga mandando en los empates. Sin ese margen la herramienta arrasaba el triángulo
+teniendo un pulse libre al lado.
+
+Para saber si una ráfaga de ruido es decoración o una voz, la pregunta no es
+cuánto dura sino **si decae desde su pico o se sostiene**: el NES lo escribe
+explícitamente en el bit de envolvente. Una nota que se mantiene es una parte
+musical y se respeta aunque sea corta.
+
 Dos invariantes se cumplen siempre:
 
 - **Todo canal prestado se devuelve.** Nunca se queda mudo ni con los ajustes del
   tambor. `NR10` se limpia (si no, desafina la siguiente nota) y la wave RAM del
   triángulo se recarga.
 - **El DMC era monofónico**, así que cada voz se trunca en el siguiente disparo.
+  Y ninguna nota puede durar más que su propia muestra, salvo que el original la
+  hiciera bucle.
 
 ### Resultado sobre material real
 
@@ -169,6 +215,32 @@ El golpe que falta es el blip de nivelación del DAC del driver: se descarta a
 propósito. Ninguna de las tres estrategias activas roba un solo frame de
 melodía en este tema. **La tabla ordena por parecido a otro chip, no por lo bien
 que suena: elige de oído.**
+
+El otro caso, un tema comercial cuyo DPCM es la línea de bajo (275 disparos, el
+DMC sonando el 80 % del tiempo, cuatro grabaciones tocadas a cinco velocidades):
+
+```
+   preset    bytes      hits   attacks  envelope  spectral
+      off    53758     0/275     0.900     0.604     0.960
+     safe    53707     2/275     0.896     0.603     0.960
+ balanced    62212   239/275     0.887     0.687     0.967
+     full    63346   274/275     0.884     0.710     0.968
+```
+
+Aquí `safe` casi no puede hacer nada, porque un bajo no cabe en el canal de
+ruido: su promesa es no tocar la melodía, y cumplirla significa quedarse quieta.
+Por bandas, contra la referencia con su DPCM sonando:
+
+```
+   banda        off     safe  balanced     full
+ 40-100 Hz    0.278    0.279     0.557    0.649    <- el bajo muestreado
+100-170 Hz    0.685    0.685     0.668    0.607    <- el triángulo
+170-400 Hz    0.839    0.839     0.812    0.799
+  400-1 kHz   0.870    0.870     0.856    0.847
+```
+
+Es el compromiso en crudo: el bajo se recupera y el triángulo paga por ello,
+poco en `balanced` y algo más en `full`.
 
 ## Qué se pierde, y por qué
 

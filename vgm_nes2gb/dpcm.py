@@ -13,7 +13,7 @@ from theory. See ``README.md`` for the numbers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 import numpy as np
@@ -362,6 +362,10 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(Role.HAT, "very bright", 1.5, lambda f: f.centroid_hz >= 6000.0),
     _Rule(Role.HAT, "no bass", 1.0, lambda f: f.low < 0.20),
     _Rule(Role.HAT, "attacks late", -3.0, lambda f: f.peak_position > 0.5),
+    # Without this veto a low sample whose pitch fell outside the detector's
+    # range scores on "very short" alone and wins the role by default. A cymbal
+    # made of bass is not a thing.
+    _Rule(Role.HAT, "all bass", -4.0, lambda f: f.low >= 0.6),
     # A tom is a pitched drum: clearer pitch than a snare, higher than a kick.
     _Rule(Role.TOM, "drum pitch", 2.0, lambda f: 120.0 <= f.pitch_hz <= 500.0 and f.pitch_confidence > 0.35),
     _Rule(Role.TOM, "mid body", 1.5, lambda f: f.mid >= 0.30 and f.low < 0.45),
@@ -494,7 +498,95 @@ def analyze_all(
         if ref in out:
             continue
         out[ref] = analyze(rom, ref, role_override=overrides.get(ref.address))
+    return _apply_song_context(out)
+
+
+# The DMC rate is the only knob that transposes a sample, so a driver that plays
+# one address back at several rates is playing a scale on it. Drums get at most
+# a normal and a low variant, so this only fires well clear of them.
+_MELODIC_RATE_COUNT = 3
+_MELODIC_PITCH_CONFIDENCE = 0.5
+_PERCUSSIVE_ROLES = (Role.KICK, Role.SNARE, Role.HAT, Role.TOM)
+
+
+def _apply_song_context(
+    analyses: dict[SampleRef, SampleAnalysis],
+) -> dict[SampleRef, SampleAnalysis]:
+    """Re-read percussion verdicts in the light of how the song uses the sample.
+
+    Classification looks at one sample in isolation, and in isolation a short
+    sampled bass note really does look like a kick: low, dark, struck rather
+    than held. The evidence that separates them is not in the waveform at all,
+    it is in the song - a kick is played at one or two pitches, a bass line at
+    however many the melody needs. Only the collection can see that, so the
+    correction belongs here rather than in the rules.
+
+    The decision is taken per address, because the instrument is the sample and
+    the rate is only which note it is playing. Judging each rate separately
+    would let one note of a bass line come out as a drum simply because its
+    pitch fell outside what the detector can measure.
+    """
+
+    by_address: dict[int, list[SampleRef]] = {}
+    for ref in analyses:
+        by_address.setdefault(ref.address, []).append(ref)
+
+    out: dict[SampleRef, SampleAnalysis] = dict(analyses)
+    for address, refs in by_address.items():
+        if len(refs) < _MELODIC_RATE_COUNT:
+            continue
+        if any(analyses[ref].overridden for ref in refs):
+            continue
+        if not any(analyses[ref].role in _PERCUSSIVE_ROLES for ref in refs):
+            continue
+        # The median rather than the best: one lucky reading is not evidence
+        # that a whole drum sample is really an instrument.
+        confidences = sorted(analyses[ref].features.pitch_confidence for ref in refs)
+        if confidences[len(confidences) // 2] < _MELODIC_PITCH_CONFIDENCE:
+            continue
+
+        anchor = max(refs, key=lambda r: analyses[r].features.pitch_confidence)
+        reason = (
+            f"the song plays this sample at {len(refs)} different rates: "
+            f"a melodic instrument, not a drum"
+        )
+        for ref in refs:
+            analysis = analyses[ref]
+            if analysis.role not in _PERCUSSIVE_ROLES:
+                continue
+            out[ref] = SampleAnalysis(
+                ref=ref,
+                decoded=analysis.decoded,
+                features=_borrow_pitch(analysis, analyses[anchor]),
+                role=Role.TONAL,
+                confidence=analysis.confidence,
+                reasons=(reason, f"isolated verdict was {analysis.role.value}"),
+            )
     return out
+
+
+def _borrow_pitch(analysis: SampleAnalysis, anchor: SampleAnalysis) -> SampleFeatures:
+    """Recover a note's pitch from a sibling when the detector could not hear it.
+
+    The DMC rate is a clock divider, so the same bytes played faster come out
+    proportionally higher - exactly. A note below the detector's floor is
+    therefore not unknowable: it is the sibling's pitch scaled by the ratio of
+    the two rates, which is better than either a wrong reading or a default.
+    """
+    if analysis.features.pitch_confidence >= _MELODIC_PITCH_CONFIDENCE:
+        return analysis.features
+    if anchor.features.pitch_confidence < _MELODIC_PITCH_CONFIDENCE:
+        return analysis.features
+    if anchor.decoded.rate_hz <= 0:
+        return analysis.features
+    scaled = anchor.features.pitch_hz * (
+        analysis.decoded.rate_hz / anchor.decoded.rate_hz
+    )
+    return replace(
+        analysis.features,
+        pitch_hz=scaled,
+        pitch_confidence=anchor.features.pitch_confidence,
+    )
 
 
 # ---------------------------------------------------------------------------

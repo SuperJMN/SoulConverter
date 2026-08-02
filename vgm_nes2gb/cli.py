@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import sys
@@ -171,8 +172,13 @@ def _convert_one(source: str, destination: str, args) -> None:
 
 def _emit(result, destination: str, args) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(destination)) or ".", exist_ok=True)
+    payload = result.payload
+    # ``.vgz`` is not a different format, it is a gzipped VGM. Writing the plain
+    # bytes under that name produces a file some players refuse to open.
+    if destination.lower().endswith(".vgz"):
+        payload = gzip.compress(payload)
     with open(destination, "wb") as handle:
-        handle.write(result.payload)
+        handle.write(payload)
     result.report["output"]["path"] = os.path.abspath(destination)
 
     stem = _sidecar_stem(destination)
@@ -244,7 +250,18 @@ def _dump_samples(source: str, directory: str, roles: dict[int, Role], quiet: bo
 
 def _variant_path(destination: str, preset: str) -> str:
     stem = _sidecar_stem(destination)
-    return _sibling(destination, f"{stem}.{preset}{OUTPUT_SUFFIX}")
+    extension = _output_extension(destination)
+    return _sibling(destination, f"{stem}.{preset}{extension}")
+
+
+def _output_extension(destination: str) -> str:
+    """The suffix asked for, so that ``-o theme.vgz`` really produces ``.vgz`` files."""
+    name = os.path.basename(destination).lower()
+    if name.endswith(".vgz"):
+        return ".vgz"
+    if name.endswith(OUTPUT_SUFFIX):
+        return OUTPUT_SUFFIX
+    return os.path.splitext(name)[1] or OUTPUT_SUFFIX
 
 
 def _sidecar_stem(destination: str) -> str:

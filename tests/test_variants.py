@@ -8,6 +8,7 @@ that `off` is byte-for-byte the converter as it was before any of this existed.
 
 from __future__ import annotations
 
+import gzip
 import os
 import shutil
 import tempfile
@@ -170,6 +171,22 @@ class CommandLineTests(unittest.TestCase):
                 self.assertTrue(os.path.exists(path), path)
                 self.assertGreater(os.path.getsize(path), 0)
 
+    def test_asking_for_vgz_gets_vgz(self):
+        """``.vgz`` is a gzipped VGM, so writing raw bytes under that name lies."""
+        out = os.path.join(self.directory, "theme.vgz")
+        self.assertEqual(
+            cli.main(["convert", self.source, "-o", out, "--quiet", "--variants"]), 0
+        )
+
+        for name in PRESETS:
+            path = os.path.join(self.directory, f"theme.{name}.vgz")
+            with self.subTest(preset=name):
+                self.assertTrue(os.path.exists(path), path)
+                with open(path, "rb") as handle:
+                    payload = handle.read()
+                self.assertEqual(payload[:2], b"\x1f\x8b")
+                self.assertEqual(gzip.decompress(payload)[:4], b"Vgm ")
+
     def test_a_single_strategy_writes_exactly_the_file_asked_for(self):
         out = self._run("--dpcm", "balanced")
 
@@ -231,6 +248,67 @@ class CommandLineTests(unittest.TestCase):
 
         roles = {entry["role"] for entry in data["dpcm"]["samples"]}
         self.assertIn("tom", roles)
+
+
+class SampledBassSongTests(unittest.TestCase):
+    """A song whose DPCM is the bass part rather than the drum kit.
+
+    The other shape real material comes in, and the one that used to convert
+    badly: every note read as a kick drum, so the strategies that place drums
+    politely placed nothing, and the boldest one turned a bass line into a
+    string of thuds while evicting the triangle to do it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.mkdtemp(prefix="vgm-bass-")
+        cls.source = os.path.join(cls.directory, "bass.vgm")
+        with open(cls.source, "wb") as handle:
+            handle.write(testing.sampled_bass_vgm())
+        cls.results = {
+            result.preset: result
+            for result in converter.convert_variants(cls.source, render_audio=False)
+        }
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.directory, ignore_errors=True)
+
+    def _section(self, preset):
+        return self.results[preset].report["dpcm"]
+
+    def test_the_bass_is_recognised_as_an_instrument(self):
+        roles = {entry["role"] for entry in self._section("full")["samples"]}
+
+        self.assertEqual(roles, {"tonal"})
+
+    def test_the_bass_line_actually_gets_played(self):
+        section = self._section("full")
+
+        self.assertEqual(section["placed"], section["hits"])
+
+    def test_most_of_it_lands_on_the_wave_channel(self):
+        hosts = self._section("full")["per_host"]
+
+        self.assertGreater(hosts.get("ch3", 0), sum(hosts.values()) / 2)
+
+    def test_the_bass_is_cheap_rather_than_greedy(self):
+        """Taking the first affordable host used to bulldoze the arrangement.
+
+        The bass wins around 220 frames of channel time here; what it costs the
+        original parts should stay a small fraction of that, because CH3 is idle
+        most of the song and the allocator is supposed to notice.
+        """
+        section = self._section("full")
+        taken = sum(section["preempted_frames"].values())
+
+        self.assertIn("ch3", section["per_host"])
+        self.assertLess(taken, 60)
+
+    def test_every_variant_stays_importable(self):
+        for preset, result in self.results.items():
+            with self.subTest(preset=preset):
+                self.assertTrue(_commands(result.payload) <= ALLOWED_COMMANDS)
 
 
 @unittest.skipUnless(os.path.exists(RUNNER_THEME), "runner theme not available")

@@ -345,6 +345,110 @@ class OccupancyTests(unittest.TestCase):
             attacking.cost(Host.CH2, 0, frames), steady.cost(Host.CH2, 0, frames)
         )
 
+    def test_a_fading_noise_run_is_decoration_however_long_its_tail(self):
+        """A struck hit rings on; what makes it decoration is that it fades."""
+        frames = 12
+        fading = [1.0 * (0.8**n) for n in range(frames)]
+        held = [1.0] * frames
+
+        def occupancy(levels):
+            return allocator._Occupancy(
+                volume={host: levels for host in Host},
+                attack={host: [False] * frames for host in Host},
+                burst={host: [frames] * frames for host in Host},
+            )
+
+        self.assertLess(
+            occupancy(fading).cost(Host.CH4, 0, 1),
+            occupancy(held).cost(Host.CH4, 0, 1),
+        )
+
+    def test_cost_per_frame_is_what_a_benefit_per_hit_compares_against(self):
+        frames = 20
+        occupancy = allocator._Occupancy(
+            volume={host: [0.5] * frames for host in Host},
+            attack={host: [False] * frames for host in Host},
+            burst={host: [frames] * frames for host in Host},
+        )
+
+        self.assertAlmostEqual(
+            occupancy.rate(Host.CH2, 0, frames),
+            occupancy.cost(Host.CH2, 0, frames) / frames,
+        )
+        # The point of the rate: a long note is not unaffordable merely for
+        # being long, which is what comparing an integral with an instant did.
+        self.assertAlmostEqual(
+            occupancy.rate(Host.CH2, 0, frames), occupancy.rate(Host.CH2, 0, 2)
+        )
+
+
+class PlacementTradeOffTests(unittest.TestCase):
+    """Timbre decides between comparable hosts; a much cheaper host overrules it."""
+
+    def _plan(self, background, preset="full"):
+        """A three-note bass line, which is what makes it read as an instrument."""
+        rom, layout = _bass_kit()
+        address, length = layout["bass"]
+        frames = [[(0x15, 0x0F), (0x17, 0x40)]]
+        for rate in (15, 14, 12):
+            frames.append(
+                list(background) + testing.dpcm_trigger(address, length, rate_index=rate)
+            )
+            _pad(frames, 24)
+        _pad(frames, 30)
+        timeline, parsed = _timeline(frames, rom)
+        return allocator.plan(timeline, parsed, preset=preset)
+
+    def test_the_line_is_recognised_as_melodic_before_anything_is_placed(self):
+        plan = self._plan([])
+
+        self.assertTrue(plan.voices)
+        self.assertEqual({v.analysis.role for v in plan.voices}, {Role.TONAL})
+
+    def test_a_bass_note_prefers_the_wave_channel_when_nothing_is_playing(self):
+        plan = self._plan([])
+
+        primary = [v for v in plan.voices if v.layer_of is None]
+        self.assertEqual({v.host for v in primary}, {Host.CH3})
+
+    def test_it_moves_aside_rather_than_evict_a_busy_triangle(self):
+        """The failure this fixes: the bass line silenced the triangle all song."""
+        plan = self._plan(testing.triangle_note(147.0))
+
+        primary = [v for v in plan.voices if v.layer_of is None]
+        self.assertTrue(primary)
+        self.assertNotIn(Host.CH3, {v.host for v in primary})
+
+    def test_a_sustained_note_is_affordable_at_all(self):
+        """Integrating cost while benefit stayed flat made every long note lose."""
+        plan = self._plan([])
+
+        self.assertGreater(plan.voices[0].frames, 4)
+
+    def test_a_note_never_outlasts_the_sample_it_stands_in_for(self):
+        rom, layout = _bass_kit()
+        address, length = layout["bass"]
+        frames = [[(0x15, 0x0F), (0x17, 0x40)]]
+        for rate in (15, 14, 12):
+            frames.append(testing.dpcm_trigger(address, length, rate_index=rate))
+            _pad(frames, 120)
+        timeline, parsed = _timeline(frames, rom)
+
+        plan = allocator.plan(timeline, parsed, preset="full")
+
+        self.assertTrue(plan.voices)
+        for voice in plan.voices:
+            sample_frames = voice.analysis.decoded.duration_seconds * 60.0
+            with self.subTest(tick=voice.tick):
+                self.assertLessEqual(voice.frames, round(sample_frames) + 1)
+                self.assertLess(voice.frames, 100)
+
+
+def _bass_kit():
+    """One plucked bass sample, played at enough rates to read as an instrument."""
+    payload = testing.encode_dpcm(testing.synth_bass_note())
+    return {0xC000: payload}, {"bass": (0xC000, len(payload))}
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

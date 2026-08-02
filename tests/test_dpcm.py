@@ -246,5 +246,71 @@ class DmcChannelTests(unittest.TestCase):
                 self.assertEqual(analysis.role.value, expected[ref.address])
 
 
+class SongContextTests(unittest.TestCase):
+    """Evidence that is in the arrangement rather than in the waveform.
+
+    A short sampled bass note is indistinguishable from a kick drum on its own:
+    both are low, dark and struck. What separates them is that the driver
+    transposes one of them and not the other, and transposition is only visible
+    across the whole set of references.
+    """
+
+    @staticmethod
+    def _analyses(rates, waveform=None):
+        rom = vgm_reader.DpcmRom()
+        payload = testing.encode_dpcm(
+            testing.synth_bass_note() if waveform is None else waveform
+        )
+        rom.load(0xC000, payload)
+        refs = [nes_apu.SampleRef(0xC000, len(payload), rate) for rate in rates]
+        return dpcm.analyze_all(rom, refs), refs
+
+    def test_one_sample_played_at_many_rates_is_an_instrument(self):
+        analyses, refs = self._analyses([10, 12, 14, 15])
+
+        for ref in refs:
+            with self.subTest(rate=ref.rate_index):
+                self.assertEqual(analyses[ref].role, Role.TONAL)
+
+    def test_the_verdict_says_why_it_overruled_the_waveform(self):
+        analyses, refs = self._analyses([10, 12, 14, 15])
+
+        reasons = " ".join(analyses[refs[0]].reasons)
+        self.assertIn("4 different rates", reasons)
+        self.assertIn("kick", reasons)
+
+    def test_the_same_sample_alone_reads_as_a_drum(self):
+        """The premise: nothing in the waveform gives the instrument away."""
+        analyses, refs = self._analyses([15])
+
+        self.assertEqual(analyses[refs[0]].role, Role.KICK)
+
+    def test_a_drum_pitched_down_once_is_still_a_drum(self):
+        """Two rates is a normal and a low variant, which is how kits are used."""
+        analyses, refs = self._analyses([14, 15])
+
+        for ref in refs:
+            with self.subTest(rate=ref.rate_index):
+                self.assertEqual(analyses[ref].role, Role.KICK)
+
+    def test_transposing_something_with_no_pitch_proves_nothing(self):
+        """Retuning noise does not make it melodic, so a real kit stays a kit."""
+        analyses, refs = self._analyses([10, 12, 14, 15], testing.synth_kick())
+
+        for ref in refs:
+            with self.subTest(rate=ref.rate_index):
+                self.assertNotEqual(analyses[ref].role, Role.TONAL)
+
+    def test_a_hand_override_still_wins(self):
+        rom = vgm_reader.DpcmRom()
+        payload = testing.encode_dpcm(testing.synth_bass_note())
+        rom.load(0xC000, payload)
+        refs = [nes_apu.SampleRef(0xC000, len(payload), rate) for rate in (10, 12, 15)]
+
+        analyses = dpcm.analyze_all(rom, refs, overrides={0xC000: Role.KICK})
+
+        self.assertEqual({a.role for a in analyses.values()}, {Role.KICK})
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

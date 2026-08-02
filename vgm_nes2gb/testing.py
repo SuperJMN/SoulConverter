@@ -234,6 +234,28 @@ def synth_kick(seconds: float = 0.09, rate: float = DMC_RATE_HZ[15]):
     return mixed / (np.abs(mixed).max() + 1e-9)
 
 
+def synth_bass_note(seconds: float = 0.25, frequency_hz: float = 82.0,
+                    rate: float = DMC_RATE_HZ[15]):
+    """A plucked bass note: strongly periodic, but struck rather than held.
+
+    This is the sample that breaks a waveform-only classifier. Every physical
+    property the rules measure says kick drum - low, dark, a sharp attack and a
+    fast decay - and only the fact that the driver plays it at several rates
+    reveals that it is an instrument. Real material does exactly this: NES bass
+    lines are single plucks retuned by the DMC rate.
+    """
+    count = int(seconds * rate)
+    time = np.arange(count) / rate
+    phase = 2 * np.pi * frequency_hz * time
+    body = (
+        np.sin(phase)
+        + 0.5 * np.sin(2 * phase)
+        + 0.25 * np.sin(3 * phase)
+    )
+    shaped = body * np.exp(-time / 0.06)
+    return shaped / (np.abs(shaped).max() + 1e-9)
+
+
 def synth_snare(seconds: float = 0.06, rate: float = DMC_RATE_HZ[15]):
     """Band-passed noise centred near 1.5 kHz over a short shell tone."""
     count = int(seconds * rate)
@@ -340,4 +362,48 @@ def dpcm_demo_vgm(loop: bool = True) -> bytes:
         loop_frame=1 if loop else None,
         dpcm_rom=rom,
         gd3_fields=["vgm-nes2gb dpcm demo", "", "vgm-nes2gb", "", "NES/Famicom"],
+    )
+
+
+def sampled_bass_song() -> tuple[list[list[tuple[int, int]]], dict[int, bytes]]:
+    """A melody over a bass line the DMC plays by retuning one sample.
+
+    This is the other way NES drivers use the sample channel, and the harder one
+    to convert: the DPCM is not decoration on top of the arrangement, it is the
+    bass part. The triangle plays a counter-line in a different register and
+    only some of the time, so a converter has to notice that CH3 is free often
+    enough to carry the bass without silencing the triangle wholesale.
+    """
+    payload = encode_dpcm(synth_bass_note())
+    rom = {0xC000: payload}
+    length = len(payload)
+    # One sample, five rates: the scale that gives the instrument away.
+    line = [15, 14, 13, 15, 12, 14, 15, 13]
+    melody = [659.26, 587.33, 523.25, 587.33, 659.26, 783.99, 659.26, 523.25]
+
+    frames: list[list[tuple[int, int]]] = [[(0x15, 0x0F), (0x17, 0x40)]]
+    for step, rate in enumerate(line * 2):
+        writes = list(dpcm_trigger(0xC000, length, rate_index=rate))
+        writes += pulse_note(0, melody[step % len(melody)], 11, DUTY_50)
+        if step % 4 == 0:
+            writes += pulse_note(1, 329.63, 7, DUTY_25, decay=True)
+        if step % 4 == 2:
+            writes += triangle_note(196.0)
+        elif step % 4 == 3:
+            writes += triangle_off()
+        frames.append(writes)
+        frames.extend([[] for _ in range(15)])
+
+    frames.append(pulse_off(0) + pulse_off(1) + triangle_off() + dpcm_stop())
+    frames.extend([[] for _ in range(15)])
+    return frames, rom
+
+
+def sampled_bass_vgm(loop: bool = True) -> bytes:
+    frames, rom = sampled_bass_song()
+    return build_nes_vgm(
+        frames,
+        loop_frame=1 if loop else None,
+        dpcm_rom=rom,
+        gd3_fields=["vgm-nes2gb sampled bass demo", "", "vgm-nes2gb", "", "NES/Famicom"],
     )

@@ -94,6 +94,13 @@ def convert_variants(
     ]
 
 
+def convert_gb_file(path: str, *, render_audio: bool = True):
+    """Convert one Game Boy VGM through the reverse GB-to-NES pipeline."""
+    from . import gb_to_nes
+
+    return gb_to_nes.convert_file(path, render_audio=render_audio)
+
+
 def _convert_timeline(
     path: str,
     stream: vgm_reader.NesCommandStream,

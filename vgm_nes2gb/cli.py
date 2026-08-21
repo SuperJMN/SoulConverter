@@ -6,9 +6,10 @@ import argparse
 import gzip
 import json
 import os
+import struct
 import sys
 
-from . import converter, testing
+from . import converter, gb_to_nes, testing, vgm_reader
 from .allocator import DEFAULT_PRESET, PRESETS
 from .dpcm import Role
 from .nes_apu import DEFAULT_TICK_HZ
@@ -18,6 +19,7 @@ from .vgm_reader import VgmFormatError
 
 SOURCE_EXTENSIONS = (".vgm", ".vgz")
 OUTPUT_SUFFIX = ".gb.vgm"
+NES_OUTPUT_SUFFIX = ".nes.vgm"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,6 +33,15 @@ def build_parser() -> argparse.ArgumentParser:
     convert.add_argument("input", help="NES .vgm/.vgz file, or a directory of them")
     convert.add_argument(
         "-o", "--out", help="output file, or output directory in batch mode"
+    )
+    convert.add_argument(
+        "--to",
+        choices=("auto", "gb", "nes"),
+        default="auto",
+        help=(
+            "target sound chip: gb for NES input, nes for Game Boy input; "
+            "auto detects the source header (default: %(default)s)"
+        ),
     )
     convert.add_argument(
         "--tick-hz",
@@ -134,16 +145,22 @@ def _run_convert(args) -> int:
 
     failures = 0
     for source in sources:
-        destination = _output_path(source, args.out, batch)
         try:
-            _convert_one(source, destination, args)
+            target = _resolve_target(source, args.to)
+            destination = _output_path(source, args.out, batch, target)
+            _convert_one(source, destination, args, target)
         except (VgmFormatError, OSError, ValueError) as error:
             failures += 1
             print(f"error: {source}: {error}", file=sys.stderr)
     return 1 if failures == len(sources) else (2 if failures else 0)
 
 
-def _convert_one(source: str, destination: str, args) -> None:
+def _convert_one(source: str, destination: str, args, target: str) -> None:
+    if target == "nes":
+        result = gb_to_nes.convert_file(source, render_audio=True)
+        _emit(result, destination, args)
+        return
+
     roles = _parse_roles(args.dpcm_role)
     common = dict(
         tick_hz=args.tick_hz,
@@ -199,7 +216,12 @@ def _emit(result, destination: str, args) -> None:
             json.dump(result.report, handle, indent=2, ensure_ascii=False)
 
     if not args.quiet:
-        print(converter.render_text(result.report))
+        renderer = (
+            gb_to_nes.render_text
+            if result.preset == "gb-to-nes"
+            else converter.render_text
+        )
+        print(renderer(result.report))
         print()
 
 
@@ -265,10 +287,11 @@ def _output_extension(destination: str) -> str:
 
 
 def _sidecar_stem(destination: str) -> str:
-    """Base name for WAV/PNG/JSON companions, without the ``.gb.vgm`` suffix."""
+    """Base name for WAV/PNG/JSON companions, without a target suffix."""
     name = os.path.basename(destination)
-    if name.lower().endswith(OUTPUT_SUFFIX):
-        return name[: -len(OUTPUT_SUFFIX)]
+    for suffix in (OUTPUT_SUFFIX, NES_OUTPUT_SUFFIX, ".gb.vgz", ".nes.vgz"):
+        if name.lower().endswith(suffix):
+            return name[: -len(suffix)]
     return os.path.splitext(name)[0]
 
 
@@ -286,8 +309,27 @@ def _collect_sources(path: str) -> list[str]:
     return [path] if os.path.isfile(path) else []
 
 
-def _output_path(source: str, out: str | None, batch: bool) -> str:
-    default = _default_name(source)
+def _resolve_target(source: str, requested: str) -> str:
+    if requested != "auto":
+        return requested
+    data = vgm_reader.read_bytes(source)
+    gb_clock = _header_u32(data, 0x80) & 0x3FFFFFFF
+    nes_clock = _header_u32(data, 0x84) & 0x3FFFFFFF
+    if gb_clock and not nes_clock:
+        return "nes"
+    if nes_clock and not gb_clock:
+        return "gb"
+    # Let the original NES reader produce its precise diagnostic for malformed
+    # or clockless NES files (and preserve the historical CLI error text).
+    return "gb"
+
+
+def _header_u32(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<I", data, offset)[0] if offset + 4 <= len(data) else 0
+
+
+def _output_path(source: str, out: str | None, batch: bool, target: str) -> str:
+    default = _default_name(source, target)
     if not out:
         return os.path.join(os.path.dirname(source), default)
     if batch or os.path.isdir(out):
@@ -295,13 +337,13 @@ def _output_path(source: str, out: str | None, batch: bool) -> str:
     return out
 
 
-def _default_name(source: str) -> str:
+def _default_name(source: str, target: str = "gb") -> str:
     stem = os.path.basename(source)
     for extension in SOURCE_EXTENSIONS:
         if stem.lower().endswith(extension):
             stem = stem[: -len(extension)]
             break
-    return stem + OUTPUT_SUFFIX
+    return stem + (NES_OUTPUT_SUFFIX if target == "nes" else OUTPUT_SUFFIX)
 
 
 if __name__ == "__main__":  # pragma: no cover

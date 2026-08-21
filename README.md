@@ -1,6 +1,8 @@
 # vgm-nes2gb
 
-Convierte temas de NES en formato VGM a temas de Game Boy en formato VGM.
+Convierte temas entre VGM de NES y VGM de Game Boy. La dirección NES→GB sigue
+siendo la predeterminada para entradas NES; `convert` detecta automáticamente la
+APU de la entrada y también admite la ruta inversa con `--to nes`.
 
 Los dos chips no son equivalentes, así que la conversión no es una traducción de
 registros: la herramienta **emula el APU del 2A03**, extrae el estado *musical*
@@ -26,6 +28,9 @@ apagado; consulta [La quinta voz](#la-quinta-voz-el-dpcm-en-los-otros-canales).
 # Un fichero
 python3 -m vgm_nes2gb convert tema.nes.vgz -o tema.gb.vgm
 
+# La ruta inversa: Game Boy DMG -> NES 2A03
+python3 -m vgm_nes2gb convert tema.gb.vgz -o tema.nes.vgz --to nes
+
 # Con informe JSON, WAVs de referencia y espectrograma comparativo
 python3 -m vgm_nes2gb convert tema.nes.vgz -o out/tema.gb.vgm --report out --wav --spectrogram
 
@@ -49,6 +54,7 @@ Requiere Python 3.12 y `numpy`. `scipy` no es necesario. No hace falta
 
 | Opción | Efecto |
 |---|---|
+| `--to auto\|gb\|nes` | detecta la fuente o fuerza el chip de destino. `--to nes` activa GB DMG → NES 2A03. |
 | `--volume-mode retrigger` | (por defecto) volumen fijo por tick igual al del NES, re-disparando el canal cada vez que cambia. Sigue la dinámica con precisión, a costa de más bytes. |
 | `--volume-mode envelope` | traslada la envolvente del NES a la unidad de envolvente del GB una sola vez por nota. Sale la mitad de grande y no chasquea. |
 | `--tick-hz N` | resolución de la rejilla de conversión (60 Hz por defecto). Súbelo si el tema usa arpegios rápidos. |
@@ -81,6 +87,19 @@ El sweep del NES, el envelope, el length counter y el linear counter se resuelve
 en la emulación; al GB le llega ya el resultado. El sweep del hardware del GB se
 deja desactivado (`NR10 = 0x00`) salvo cuando lo pide una receta de percusión, y
 se limpia siempre al devolver el canal.
+
+## Game Boy a NES
+
+La conversión inversa conserva la temporización absoluta y traduce los dos
+cuadrados y el ruido a sus equivalentes del 2A03. Las envolventes del DMG se
+reproducen y se escriben como cambios de volumen constante del NES, para no
+perder ataques ni decays. El canal wave se convierte en el triángulo fijo del
+NES: la tabla de 32 pasos del DMG no tiene equivalente en el 2A03 y el informe
+lo marca explícitamente.
+
+```bash
+python3 -m vgm_nes2gb convert tema.gb.vgz -o tema.nes.vgz --to nes --wav --report out
+```
 
 ## La quinta voz: el DPCM en los otros canales
 

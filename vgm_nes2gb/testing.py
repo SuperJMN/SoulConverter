@@ -13,6 +13,7 @@ import numpy as np
 NTSC_CPU_HZ = 1789772
 VGM_SAMPLE_RATE = 44100
 FRAME_SAMPLES = 735
+GB_CLOCK_HZ = 4194304
 
 HEADER_SIZE = 0x100
 
@@ -70,6 +71,43 @@ def build_nes_vgm(
     _put(header, 0x24, 60)
     _put(header, 0x34, HEADER_SIZE - 0x34)
     _put(header, 0x84, cpu_clock_hz)
+    return bytes(header) + bytes(data) + gd3
+
+
+def build_gb_vgm(
+    frames: list[list[tuple[int, int]]],
+    *,
+    cpu_clock_hz: int = GB_CLOCK_HZ,
+    loop_frame: int | None = None,
+    gd3_fields: list[str] | None = None,
+) -> bytes:
+    """Encode per-frame ``(DMG register, value)`` writes for reverse tests."""
+    data = bytearray()
+    loop_offset = None
+    for index, writes in enumerate(frames):
+        if loop_frame is not None and index == loop_frame:
+            loop_offset = len(data)
+        for register, value in writes:
+            data.extend((0xB3, register & 0xFF, value & 0xFF))
+        data.extend((0x61, FRAME_SAMPLES & 0xFF, FRAME_SAMPLES >> 8))
+    data.append(0x66)
+
+    total_samples = len(frames) * FRAME_SAMPLES
+    gd3 = _build_gd3(gd3_fields) if gd3_fields else b""
+    gd3_position = HEADER_SIZE + len(data)
+    eof_position = gd3_position + len(gd3)
+    header = bytearray(HEADER_SIZE)
+    header[0:4] = b"Vgm "
+    _put(header, 0x04, eof_position - 0x04)
+    _put(header, 0x08, 0x00000161)
+    _put(header, 0x14, gd3_position - 0x14 if gd3 else 0)
+    _put(header, 0x18, total_samples)
+    if loop_offset is not None:
+        _put(header, 0x1C, HEADER_SIZE + loop_offset - 0x1C)
+        _put(header, 0x20, total_samples - loop_frame * FRAME_SAMPLES)
+    _put(header, 0x24, 60)
+    _put(header, 0x34, HEADER_SIZE - 0x34)
+    _put(header, 0x80, cpu_clock_hz)
     return bytes(header) + bytes(data) + gd3
 
 

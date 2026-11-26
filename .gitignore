@@ -12,3 +12,4 @@ out/
 *.vgm
 __pycache__/
 *.pyc
+nupkg/

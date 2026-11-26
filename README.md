@@ -1,71 +1,125 @@
-# vgm-nes2gb
+# SoulConverter
 
-Convierte temas entre VGM de NES y VGM de Game Boy. La dirección NES→GB sigue
-siendo la predeterminada para entradas NES; `convert` detecta automáticamente la
-APU de la entrada y también admite la ruta inversa con `--to nes`.
+Biblioteca .NET (y su línea de comandos) que convierte logs VGM de música y
+efectos de sonido entre tres chips, de cualquiera a cualquier otro:
 
-Los dos chips no son equivalentes, así que la conversión no es una traducción de
-registros: la herramienta **emula el APU del 2A03**, extrae el estado *musical*
-resultante (qué nota, con qué volumen, con qué timbre, en cada instante) y lo
-re-sintetiza como escrituras de registros del DMG.
+| Chip | Consola | En la línea de comandos |
+|---|---|---|
+| **2A03** | NES / Famicom | `nes` |
+| **DMG** | Game Boy | `gb` |
+| **SN76489** | Master System, Game Gear | `sms` |
+
+Los tres chips no son equivalentes, así que una conversión no es una traducción
+de registros: el log de origen **se reproduce** (envolventes, contadores de
+longitud, barridos, contador lineal, secuenciador de frames), de ahí sale el
+estado *musical* (qué nota, con qué volumen, con qué timbre, en cada instante) y
+ese estado se vuelve a escribir como registros del chip de destino.
 
 ```
-IN.vgm/.vgz ─▶ vgm_reader ─▶ nes_apu ─▶ nes_to_gb ─▶ gb_vgm_writer ─▶ OUT.gb.vgm
-                                │  │        ▲  │             │
-                                │  └─ dpcm ─┘  │             │
-                                │     percussion              │
-                                │     allocator               │
-                                └───────────┴─────────────────┴─▶ render + analyze ─▶ informe
+                 ┌─ lector 2A03 ─┐                    ┌─ escritor 2A03 ─┐
+IN.vgm / .vgz ──▶├─ lector DMG ──┤──▶ estado musical ─▶├─ escritor DMG ──┤──▶ OUT.vgm
+                 └─ lector SN ───┘   (3 tonos, ruido,  └─ escritor SN ───┘
+                                      muestras)
 ```
 
-El Game Boy no tiene canal de muestras, así que el DPCM del NES se puede
-**re-sintetizar sobre los cuatro generadores del DMG**. Es opcional y viene
-apagado; consulta [La quinta voz](#la-quinta-voz-el-dpcm-en-los-otros-canales).
+Cada chip es un lector y un escritor del mismo modelo, de modo que las seis
+direcciones son tres lectores y tres escritores, y un chip nuevo es un lector y
+un escritor más, no más parejas escritas a mano.
 
-## Uso
+## La biblioteca
 
 ```bash
-# Un fichero
-python3 -m vgm_nes2gb convert tema.nes.vgz -o tema.gb.vgm
-
-# La ruta inversa: Game Boy DMG -> NES 2A03
-python3 -m vgm_nes2gb convert tema.gb.vgz -o tema.nes.vgz --to nes
-
-# Con informe JSON, WAVs de referencia y espectrograma comparativo
-python3 -m vgm_nes2gb convert tema.nes.vgz -o out/tema.gb.vgm --report out --wav --spectrogram
-
-# Un directorio entero
-python3 -m vgm_nes2gb convert temas/ -o convertidos/
-
-# Reconstruye la batería de DPCM sobre los canales del Game Boy
-python3 -m vgm_nes2gb convert tema.nes.vgz -o tema.gb.vgm --dpcm balanced
-
-# Una versión por estrategia, para elegir de oído
-python3 -m vgm_nes2gb convert tema.nes.vgz -o tema.gb.vgm --variants
-
-# Genera un VGM de NES sintético para probar sin material con copyright
-python3 -m vgm_nes2gb demo -o demo.vgm
+dotnet add package SoulConverter
 ```
 
-Requiere Python 3.12 y `numpy`. `scipy` no es necesario. No hace falta
-`matplotlib`: el espectrograma PNG se escribe a mano.
+```csharp
+using SoulConverter;
+
+byte[] nes = File.ReadAllBytes("tema.nes.vgz");            // VGM o VGZ; el chip se lee de la cabecera
+
+ConversionResult result = VgmConverter.Convert(nes, SoundChip.Sn76489);
+
+File.WriteAllBytes("tema.sms.vgm", result.Vgm);           // siempre VGM sin comprimir
+foreach (var warning in result.Warnings)                   // lo que el destino no toca igual
+    Console.WriteLine($"{warning.Code}: {warning.Message}");
+
+if (result.IsSilent)                                       // p. ej. un efecto hecho solo de DPCM
+    Console.WriteLine("este log no suena en el destino: prueba con otro log del mismo recurso");
+```
+
+Todo ocurre en memoria: bytes (o un `Stream`) de entrada, bytes y avisos de
+salida. La biblioteca no imprime nada ni toca ficheros, y no tiene dependencias.
+Está compilada para .NET 10.
+
+| Miembro | Qué hace |
+|---|---|
+| `VgmConverter.Convert(bytes, chip, opciones)` | convierte. Un log que ya es del chip de destino se devuelve tal cual. |
+| `VgmConverter.DetectChip(bytes)` | dice de qué chip es un log. |
+| `VgmConverter.AnalyzeDpcm(bytes)` | las muestras DPCM de un log de NES, decodificadas y clasificadas. |
+| `ConversionResult.Vgm`, `.Warnings`, `.IsSilent` | el log de destino, lo que se pierde (con un `Code` estable, ver `WarningCodes`) y si el resultado no suena nunca. |
+| `ConversionResult.Report`, `.Summary` | el informe completo como JSON y su versión en texto. |
+| `ConversionOptions` | `TickHz`, `VolumeMode`, `TransposeOutOfRange`, `Dpcm`, `DpcmRoles`, `Analyze`, `SourceName`. |
+| `DemoSongs` | tres logs de NES sintéticos para probar. |
+| `WavFile`, `SpectrogramImage` | escriben los renders de `Analyze` como WAV y como PNG comparativo. |
+
+Los errores de formato son `VgmFormatException`; un chip que no es ninguno de los
+tres (o un chip de expansión de la NES) es `UnsupportedChipException`, con el
+nombre del chip en el mensaje.
+
+## La línea de comandos
+
+La orden es una capa fina sobre la biblioteca: lee y escribe ficheros e imprime
+lo que la biblioteca informa.
+
+```bash
+dotnet tool install -g SoulConverter.Tool
+
+# Un fichero: NES -> Game Boy (el destino por defecto de un log de NES)
+soulconverter convert tema.nes.vgz -o tema.gb.vgm
+
+# Game Boy -> NES (el destino por defecto de un log de Game Boy)
+soulconverter convert tema.gb.vgz -o tema.nes.vgz
+
+# Cualquier otra dirección, diciendo el destino
+soulconverter convert tema.nes.vgz --to sms
+soulconverter convert tema.sms.vgm --to gb
+
+# Con informe JSON, WAVs de referencia y espectrograma comparativo
+soulconverter convert tema.nes.vgz -o out/tema.gb.vgm --report out --wav --spectrogram
+
+# Un directorio entero
+soulconverter convert temas/ -o convertidos/
+
+# Reconstruye la batería de DPCM sobre los canales del Game Boy
+soulconverter convert tema.nes.vgz -o tema.gb.vgm --dpcm balanced
+
+# Una versión por estrategia, para elegir de oído
+soulconverter convert tema.nes.vgz -o tema.gb.vgm --variants
+
+# Genera un VGM de NES sintético para probar sin material con copyright
+soulconverter demo -o demo.vgm
+```
+
+Desde el repositorio, sin instalar nada: `dotnet run --project src/SoulConverter.Cli -- convert …`.
 
 ### Opciones
 
 | Opción | Efecto |
 |---|---|
-| `--to auto\|gb\|nes` | detecta la fuente o fuerza el chip de destino. `--to nes` activa GB DMG → NES 2A03. |
-| `--volume-mode retrigger` | (por defecto) volumen fijo por tick igual al del NES, re-disparando el canal cada vez que cambia. Sigue la dinámica con precisión, a costa de más bytes. |
-| `--volume-mode envelope` | traslada la envolvente del NES a la unidad de envolvente del GB una sola vez por nota. Sale la mitad de grande y no chasquea. |
+| `--to auto\|nes\|gb\|sms` | chip de destino. `auto` (por defecto) lleva un log de NES al Game Boy y uno de Game Boy a la NES; un log de SN76489 necesita que se lo digas. |
 | `--tick-hz N` | resolución de la rejilla de conversión (60 Hz por defecto). Súbelo si el tema usa arpegios rápidos. |
-| `--no-transpose` | recorta las notas por debajo del rango del GB en vez de subirlas una octava. |
+| `--volume-mode retrigger` | (por defecto, destino Game Boy) volumen fijo por tick igual al del origen, re-disparando el canal cada vez que cambia. Sigue la dinámica con precisión, a costa de más bytes. |
+| `--volume-mode envelope` | traslada la envolvente del origen a la unidad de envolvente del Game Boy una sola vez por nota. Sale más pequeño y no chasquea. |
+| `--no-transpose` | recorta las notas por debajo del rango del destino en vez de subirlas una octava. |
 | `--report DIR` | escribe un JSON por fichero con todas las métricas. |
-| `--wav` | escribe el render del NES y el del GB para comparar de oído. |
+| `--wav` | escribe el render del origen y el del destino para comparar de oído. |
 | `--spectrogram` | escribe un PNG con los dos espectrogramas apilados. |
-| `--dpcm off\|safe\|balanced\|full` | qué hacer con el canal de muestras. Por defecto `off`. |
+| `--dpcm off\|safe\|balanced\|full` | qué hace el Game Boy con el canal de muestras de la NES. Por defecto `off`. |
 | `--variants` | genera un fichero por estrategia (`tema.off.gb.vgm`, `tema.safe.gb.vgm`, …) y una tabla comparativa. Respeta la extensión que pidas: con `-o tema.vgz` salen cuatro `.vgz`. |
 | `--dpcm-role ADDR=ROL` | corrige a mano la clasificación de una muestra, p. ej. `--dpcm-role 0xEA80=kick`. Repetible. |
 | `--dpcm-dump DIR` | escribe un WAV por muestra decodificada para comprobar la clasificación de oído. |
+| `--quiet` | solo imprime errores. |
+| `demo --song four-channel\|drum-kit\|sampled-bass` | cuál de los tres temas sintéticos escribir. |
 
 La extensión de salida decide el formato: `.vgm` sale en claro y `.vgz` sale
 **gzipeado de verdad**, que es lo único que distingue a los dos formatos.
@@ -73,33 +127,53 @@ La extensión de salida decide el formato: `.vgm` sale en claro y `.vgz` sale
 Código de salida: `0` correcto (aunque haya avisos), `2` si algún fichero de un
 lote falló, `1` si falló todo.
 
-## Mapeo de canales
+## Qué voz va a qué canal
 
-| NES 2A03 | Game Boy DMG | Notas |
-|---|---|---|
-| Pulse 1 (`$4000-$4003`) | CH1 square (`$FF10-$FF14`) | duty 1:1 (12.5/25/50/75 %) |
-| Pulse 2 (`$4004-$4007`) | CH2 square (`$FF16-$FF19`) | duty 1:1 |
-| Triangle (`$4008-$400B`) | CH3 wave (`$FF1A-$FF1E` + wave RAM) | triángulo de 32 pasos cargado en wave RAM |
-| Noise (`$400C-$400F`) | CH4 noise (`$FF20-$FF23`) | vecino más cercano sobre la rejilla `(shift, divisor)` |
-| DMC / DPCM (`$4010-$4013`) | los cuatro, según el reparto | **opcional**: apagado se descarta, encendido se re-sintetiza. Ver abajo. |
+Las voces se emparejan por posición en los tres chips:
 
-El sweep del NES, el envelope, el length counter y el linear counter se resuelven
-en la emulación; al GB le llega ya el resultado. El sweep del hardware del GB se
-deja desactivado (`NR10 = 0x00`) salvo cuando lo pide una receta de percusión, y
-se limpia siempre al devolver el canal.
+| Estado musical | NES 2A03 | Game Boy DMG | SN76489 |
+|---|---|---|---|
+| tono 1 | Pulse 1 (`$4000-$4003`) | CH1 square (`$FF10-$FF14`) | tono 0 |
+| tono 2 | Pulse 2 (`$4004-$4007`) | CH2 square (`$FF16-$FF19`) | tono 1 |
+| tono 3 | Triangle (`$4008-$400B`) | CH3 wave (`$FF1A-$FF1E` + wave RAM) | tono 2 |
+| ruido | Noise (`$400C-$400F`) | CH4 noise (`$FF20-$FF23`) | ruido |
+| muestras | DMC / DPCM (`$4010-$4013`) | no hay: se re-sintetizan (ver abajo) | no hay: se descartan |
 
-## Game Boy a NES
+El sweep, las envolventes, el length counter y el linear counter del origen se
+resuelven al reproducirlo; al destino le llega ya el resultado, como cambios de
+periodo y de volumen.
 
-La conversión inversa conserva la temporización absoluta y traduce los dos
-cuadrados y el ruido a sus equivalentes del 2A03. Las envolventes del DMG se
-reproducen y se escriben como cambios de volumen constante del NES, para no
-perder ataques ni decays. El canal wave se convierte en el triángulo fijo del
-NES: la tabla de 32 pasos del DMG no tiene equivalente en el 2A03 y el informe
-lo marca explícitamente.
+### Hacia el Game Boy
 
-```bash
-python3 -m vgm_nes2gb convert tema.gb.vgz -o tema.nes.vgz --to nes --wav --report out
-```
+Los duty de los pulsos pasan 1:1 (12.5/25/50/75 %). El tono 3 va al canal wave,
+con un triángulo de 32 pasos en wave RAM si viene de la NES y una cuadrada si
+viene del SN76489. El ruido toma el vecino más cercano sobre la rejilla
+`(shift, divisor)`. El sweep del hardware del Game Boy se deja desactivado
+(`NR10 = 0x00`) salvo cuando lo pide una receta de percusión, y se limpia siempre
+al devolver el canal.
+
+### Hacia la NES
+
+Los logs de Game Boy conservan su temporización absoluta: cada cambio se escribe
+en la muestra en que ocurrió, no en una rejilla. Los volúmenes se escriben como
+volumen constante, así que una envolvente del origen llega como los cambios de
+volumen que produjo. El tono 3 se toca con el triángulo, que tiene su propia
+forma de onda y no tiene volumen: suena o calla, y el informe lo avisa. Los
+pulsos se escriben con el sweep en modo resta (`$4001 = $08`), porque en modo suma
+la unidad de sweep silencia todo pulso por debajo de 109 Hz; y un triángulo que
+vuelve de un silencio recarga `$400B`, porque sus contadores se agotaron mientras
+callaba.
+
+### Hacia el SN76489
+
+Una frecuencia pasa al periodo `3579545 / (32 * f)`; las notas por debajo de los
+109.3 Hz suben octavas enteras. Un volumen lineal `v` (0-15) pasa a la atenuación
+`round(20 * log10(15 / v) / 2)` en pasos de 2 dB. El triángulo suena a volumen 12
+y el canal wave a su nivel de salida. El ruido toma la más cercana de las tres
+frecuencias fijas del PSG; el modo corto de la NES y el LFSR de 7 bits del Game
+Boy pasan a ruido periódico. **Solo se escriben los canales que suenan alguna
+vez**, de modo que un efecto de sonido convertido ocupa esos canales y no los que
+su log solo prepara o silencia.
 
 ## La quinta voz: el DPCM en los otros canales
 
@@ -118,7 +192,7 @@ Eso obliga a quitarle el canal a alguien durante unos frames, así que la
 herramienta pone precio a ese robo y sólo paga cuando compensa.
 
 ```bash
-python3 -m vgm_nes2gb convert tema.nes.vgz -o tema.gb.vgm --variants
+soulconverter convert tema.nes.vgz -o tema.gb.vgm --variants
 ```
 
 | Estrategia | Qué hace |
@@ -144,9 +218,10 @@ cada rol, y los pesos negativos son vetos. El informe dice siempre **por qué**:
    why: peak at the tail, below the DMG's range
 ```
 
-Si se equivoca, se corrige a mano con `--dpcm-role 0xE000=kick`, y el informe
-marca la muestra como corregida. Con `--dpcm-dump DIR` obtienes un WAV por
-muestra para juzgar tú.
+Si se equivoca, se corrige a mano con `--dpcm-role 0xE000=kick` (o
+`ConversionOptions.DpcmRoles` desde la biblioteca), y el informe marca la muestra
+como corregida. Con `--dpcm-dump DIR` (`VgmConverter.AnalyzeDpcm`) obtienes un WAV
+por muestra para juzgar tú.
 
 ### Cuando el DPCM no es la batería sino el bajo
 
@@ -362,17 +437,27 @@ una grabación: una cuadrada tiene más armónicos que la muestra que sustituye.
 
 ## Qué se pierde, y por qué
 
-- **DPCM.** El Game Boy no tiene canal de muestras. Con `--dpcm off` (por defecto)
-  el tema se queda sin percusión de muestras; con cualquier otra estrategia se
-  reconstruye con los generadores del DMG, que se parece pero no es lo mismo: se
-  recupera el ritmo y el ataque, no el timbre exacto de la grabación.
-- **Los graves del triangle.** El canal wave del GB no baja de 32 Hz. Las notas por
-  debajo se suben octavas enteras (y se avisa), o se recortan con `--no-transpose`.
-- **La dinámica del canal wave.** CH3 solo tiene cuatro niveles (0/25/50/100 %) y
-  no tiene envolvente. Un triangle con decaimiento marcado queda plano.
-- **El ruido no es equivalente.** Las 16 frecuencias del NES no coinciden con la
-  rejilla del GB. El informe da la desviación en cents por índice de periodo; en
-  los extremos pasa de 100 cents y se nota.
+Cada pérdida llega como un aviso en `ConversionResult.Warnings`, una vez.
+
+- **DPCM.** Ni el Game Boy ni el SN76489 tienen canal de muestras. En el SN76489
+  se descarta. En el Game Boy, con `--dpcm off` (por defecto) el tema se queda sin
+  percusión de muestras; con cualquier otra estrategia se reconstruye con los
+  generadores del DMG, que se parece pero no es lo mismo: se recupera el ritmo y
+  el ataque, no el timbre exacto de la grabación. Un efecto hecho solo de DPCM
+  deja el destino mudo: `IsSilent` lo dice.
+- **Los graves.** El canal wave del Game Boy no baja de 32 Hz, sus cuadradas de
+  64 Hz y los tonos del SN76489 de 109 Hz. Las notas por debajo se suben octavas
+  enteras (y se avisa), o se recortan con `--no-transpose`.
+- **Los timbres.** El SN76489 solo tiene cuadradas al 50 %: los demás duty, el
+  triángulo y la tabla de ondas suenan como cuadradas. La tabla de ondas del Game
+  Boy suena en la NES con el triángulo fijo del 2A03.
+- **La dinámica del canal wave y del triángulo.** CH3 solo tiene cuatro niveles
+  (0/25/50/100 %) y no tiene envolvente; el triángulo de la NES no tiene volumen.
+- **El ruido no es equivalente.** Las 16 frecuencias de la NES no coinciden con
+  la rejilla del Game Boy ni con las tres del SN76489. El informe da la desviación
+  en cents; en los extremos pasa de 100 cents y se nota.
+- **El estéreo.** El panning del Game Boy y el de la Game Gear suenan en mono; un
+  canal que no va a ningún lado calla.
 - **Los efectos más rápidos que la rejilla.** A 60 Hz un arpegio que el motor
   original actualiza varias veces por frame se pierde en parte. `--tick-hz 240`
   lo recupera a costa de tamaño.
@@ -381,10 +466,12 @@ una grabación: una cuadrada tiene más armónicos que la muestra que sustituye.
 
 ## Las métricas son un informe, no un aprobado
 
-El informe mide error de pitch en cents por canal, correlación de envolvente,
-correlación espectral y relación de RMS, comparando dos renders propios: un
-sintetizador del 2A03 alimentado por el modelo del APU, y un sintetizador del DMG
-que reproduce **los bytes del VGM emitido**, no el modelo intermedio.
+Con `ConversionOptions.Analyze` (la línea de comandos lo activa sola cuando
+imprime el resumen o escribe WAV, PNG o informe) se miden error de pitch en cents
+por canal, correlación de envolvente, correlación espectral y relación de RMS,
+comparando dos renders propios: el del log de origen y el del log convertido. El
+del 2A03 incluye sus muestras DPCM; el del DMG reproduce **los bytes del VGM
+emitido**, no el modelo intermedio.
 
 Esos números están para decidir si el resultado te vale, no para bloquear nada. La
 conversión nunca falla por una métrica. Dos chips distintos no pueden dar un render
@@ -411,55 +498,63 @@ referencia fuese honesto, ese mismo número daba 0.974 y no significaba nada.
 
 ## Compatibilidad con RetroSharp
 
-La salida está pensada para que la importe `RetroSharp.Core.Sdk.VgmImporter`, que
-es estricto. El escritor se ciñe a ese subconjunto:
+RetroSharp referencia este paquete para crear, mientras compila un juego, el log
+que necesita el chip de una consola a partir del log que el juego tiene. Los
+escritores se ciñen a lo que lee su `VgmImporter`, que es estricto:
 
-- Solo emite los comandos `0xB3`, `0x61`, `0x62` y `0x66`. La etiqueta GD3 va
-  después del `0x66`, donde ningún consumidor la lee como comando.
-- Declara el reloj DMG (`4194304`) en el offset `0x80` de la cabecera, y deja el
-  slot del 2A03 (`0x84`) a cero.
-- Solo escribe registros `0x00-0x16` (`$FF10-$FF26`) y `0x20-0x2F` (wave RAM). El
-  rango `0x17-0x1F` no está soportado por el importador y el escritor lo rechaza.
-- Traslada el punto de loop a `0x1C`/`0x20`.
+- Solo emiten el comando de escritura del chip (`0xB4` para el 2A03, `0xB3` para
+  el DMG, `0x50` para el SN76489), las esperas `0x61` y `0x62`, y `0x66`. La
+  etiqueta GD3 va después del `0x66`, donde ningún consumidor la lee como comando.
+- Declaran solo el reloj de su chip en la cabecera (`0x84`, `0x80` o `0x0C`).
+- El escritor del DMG solo usa los registros `0x00-0x16` (`$FF10-$FF26`) y
+  `0x20-0x2F` (wave RAM).
+- Trasladan el punto de loop a `0x1C`/`0x20`.
 
-`tests/test_gb_vgm_writer.py` fija ese contrato para que no se rompa por accidente.
+`GameBoyTargetTests` y `SixDirectionsTests` fijan ese contrato para que no se
+rompa por accidente.
 
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests -t .
+dotnet test
 ```
 
-No se versiona nada derivado de una ROM comercial: los fixtures son VGM de NES
-sintéticos generados en `vgm_nes2gb/testing.py`. Para pasar además la batería
-sobre temas reales de tu máquina:
+Los tests pasan por la API pública (`VgmConverter` y la orden `soulconverter`) y
+comprueban resultados observables. La prueba de las seis direcciones escribe una
+partitura hecha a mano como log de cada chip, la convierte y lee el log de
+destino con un decodificador propio de los tests, independiente de los lectores
+de la biblioteca: las notas dentro de 20 cents (módulo octavas), los comienzos y
+finales dentro de un frame, y los volúmenes dentro de un paso de la escala del
+destino.
 
-```bash
-VGM_NES2GB_SAMPLES=~/mis-temas python3 -m unittest discover -s tests -t .
-```
+No se versiona nada derivado de una ROM comercial: los logs de los tests son
+partituras escritas en los propios tests o los temas sintéticos de `DemoSongs`.
 
-Sin esa variable, `tests/test_real_theme.py` busca el BGM del runner de RetroSharp
-y, si tampoco está, se salta solo.
+## Publicar
 
-245 tests. Los que cubren la quinta voz están en `test_dpcm.py` (decodificador,
-rasgos y clasificador), `test_allocator.py` (coste, expropiación, choque de
-registro y restauración) y `test_variants.py` (una salida por estrategia, todas
-importables, y `off` byte a byte igual que antes de que existiera nada de esto).
+`azure-pipelines.yml` ejecuta [DotnetDeployer](https://github.com/SuperJMN/DotnetDeployer)
+con GitVersion: en las ramas prueba el empaquetado sin publicar y en `master`
+publica en NuGet `SoulConverter` (la biblioteca) y `SoulConverter.Tool` (la orden
+`soulconverter`). La versión sale de GitVersion (`GitVersion.yml`).
 
 ## Trabajo futuro
 
 - Soporte de chips de expansión (VRC6 es el más plausible: son dos pulses más).
 - Formas de onda de wave RAM alternativas al triángulo, por tema.
-- El 14 % de energía que aún sobra en 1-2 kHz del bajo aislado, procedente de los
-  silencios: bajar `NR32` a 0 salta de la onda al cero, mientras que el triángulo
-  del NES al callar se congela en su último valor. Un fade escalonado
-  (100 → 50 → 25 → 0) lo suavizaría a costa de añadir cola a las notas.
+- El 14 % de energía que aún sobra en 1-2 kHz del bajo aislado en el Game Boy,
+  procedente de los silencios: bajar `NR32` a 0 salta de la onda al cero, mientras
+  que el triángulo de la NES al callar se congela en su último valor. Un fade
+  escalonado (100 → 50 → 25 → 0) lo suavizaría a costa de añadir cola a las notas.
+- El escritor de la NES reescribe `$4003`/`$4007` en cada cambio de periodo, lo
+  que reinicia la fase del pulso; escribir solo el byte bajo cuando el alto no
+  cambia evitaría chasquidos en vibratos y barridos.
+- La receta del timbal baja el nivel del canal wave por pasos a lo largo de la
+  cola, pero solo se escriben sus registros del ataque.
 
 ## Licencia
 
 MIT. Ver [LICENSE](LICENSE).
 
 El repositorio contiene **sólo código**. No se versiona ni se distribuye material
-derivado de ROMs comerciales: los fixtures de los tests son VGM de NES sintéticos
-generados por `vgm_nes2gb/testing.py`, y las conversiones de temas reales se
-quedan en tu máquina.
+derivado de ROMs comerciales: los logs de los tests y de `DemoSongs` son
+sintéticos, y las conversiones de temas reales se quedan en tu máquina.

@@ -537,7 +537,7 @@ partituras escritas en los propios tests o los temas sintéticos de `DemoSongs`.
 
 ## Publicar
 
-Publica [DotnetDeployer.Fleet](https://github.com/SuperJMN/DotnetDeployer.Fleet) a
+Lo publica [DotnetDeployer.Fleet](https://github.com/SuperJMN/DotnetDeployer.Fleet) a
 partir de `deployer.yaml`: compila `SoulConverter.sln`, pasa los tests y sube a NuGet
 `SoulConverter` (la biblioteca) y `SoulConverter.Tool` (la herramienta dotnet, orden
 `soulconverter`). La versión sale de GitVersion (`GitVersion.yml`).

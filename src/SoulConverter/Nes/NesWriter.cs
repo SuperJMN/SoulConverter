@@ -152,7 +152,7 @@ internal static class NesWriter
 
             // The sweep unit silences a pulse whose target period overflows, which with the adder
             // on means every note under about 109 Hz; negating keeps the target in range.
-            writes.Add(new RegisterWrite(sample, register + 1, LegacyParity.Enabled ? 0x00 : 0x08));
+            writes.Add(new RegisterWrite(sample, register + 1, 0x08));
             writes.Add(new RegisterWrite(sample, register + 2, period & 0xFF));
             writes.Add(new RegisterWrite(sample, register + 3, 0xF8 | ((period >> 8) & 0x07)));
             channel.Period = period;
@@ -207,7 +207,7 @@ internal static class NesWriter
 
             // Silencing the triangle through $4008 clears its linear counter and lets its length
             // counter run out, and neither comes back until $400B is written again.
-            if (control != 0 && !periodChanged && !LegacyParity.Enabled)
+            if (control != 0 && !periodChanged)
             {
                 writes.Add(new RegisterWrite(sample, 0x0B, 0xF8 | ((period >> 8) & 0x07)));
             }

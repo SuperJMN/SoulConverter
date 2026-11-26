@@ -152,17 +152,14 @@ internal sealed class DmgApu
     {
         var changed = false;
         var phase = (int)(step % 8);
-        if (!LegacyParity.Enabled)
+        if (phase % 2 == 1)
         {
-            if (phase % 2 == 1)
-            {
-                changed |= squares[0].Length.Clock() | squares[1].Length.Clock() | wave.Length.Clock() | noise.Length.Clock();
-            }
+            changed |= squares[0].Length.Clock() | squares[1].Length.Clock() | wave.Length.Clock() | noise.Length.Clock();
+        }
 
-            if (phase is 3 or 7)
-            {
-                changed |= squares[0].ClockSweep();
-            }
+        if (phase is 3 or 7)
+        {
+            changed |= squares[0].ClockSweep();
         }
 
         if (phase == 0)
@@ -413,7 +410,7 @@ internal sealed class DmgApu
             Enabled = Envelope.DacOn;
             Length.Trigger();
             Envelope.Trigger();
-            if (hasSweep && !LegacyParity.Enabled)
+            if (hasSweep)
             {
                 shadow = period;
                 sweepTimer = sweepPeriod == 0 ? 8 : sweepPeriod;

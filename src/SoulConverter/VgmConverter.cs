@@ -26,9 +26,12 @@ public static class VgmConverter
     public static ConversionResult Convert(ReadOnlyMemory<byte> source, SoundChip target, ConversionOptions? options = null)
     {
         options ??= ConversionOptions.Default;
-        if (!(options.TickHz > 0) || double.IsInfinity(options.TickHz))
+        if (!(options.TickHz >= ConversionOptions.MinTickHz && options.TickHz <= ConversionOptions.MaxTickHz))
         {
-            throw new ArgumentOutOfRangeException(nameof(options), options.TickHz, "The tick rate must be positive.");
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                options.TickHz,
+                string.Create(CultureInfo.InvariantCulture, $"The tick rate must be between {ConversionOptions.MinTickHz} and {ConversionOptions.MaxTickHz} Hz."));
         }
 
         var name = options.SourceName ?? "<memory>";
@@ -97,12 +100,11 @@ public static class VgmConverter
     }
 
     /// <summary>Converts a log read from <paramref name="source"/> to the end.</summary>
+    /// <exception cref="VgmFormatException">The source is not a readable VGM log, or is too large.</exception>
     public static ConversionResult Convert(Stream source, SoundChip target, ConversionOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(source);
-        using var buffer = new MemoryStream();
-        source.CopyTo(buffer);
-        return Convert(buffer.ToArray(), target, options);
+        return Convert(VgmLogReader.ReadAtMost(source), target, options);
     }
 
     /// <summary>The chip a VGM or gzipped VGZ log drives, from its header.</summary>

@@ -115,7 +115,8 @@ public static class CommandLine
             {
                 ConvertOne(source, arguments, batch, output);
             }
-            catch (Exception exception) when (exception is VgmFormatException or IOException or UnauthorizedAccessException or ArgumentException)
+            // One log that fails must not stop the rest of a batch.
+            catch (Exception exception) when (exception is not OutOfMemoryException)
             {
                 failures++;
                 error.WriteLine($"error: {source}: {exception.Message}");
@@ -337,9 +338,11 @@ public static class CommandLine
                         break;
                     case "--tick-hz":
                         var text = Value(args, ref index);
-                        parsed.TickHz = double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var tickHz) && tickHz > 0
+                        parsed.TickHz = double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var tickHz) && tickHz >= ConversionOptions.MinTickHz && tickHz <= ConversionOptions.MaxTickHz
                             ? tickHz
-                            : throw new ArgumentException($"--tick-hz expects a positive number, got '{text}'");
+                            : throw new ArgumentException(string.Create(
+                                CultureInfo.InvariantCulture,
+                                $"--tick-hz expects a number from {ConversionOptions.MinTickHz} to {ConversionOptions.MaxTickHz}, got '{text}'"));
                         break;
                     case "--volume-mode":
                         parsed.VolumeMode = Value(args, ref index) switch

@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Compression;
 using SoulConverter.Tests.Support;
 
@@ -143,9 +144,82 @@ public sealed class ReadingTests
     [InlineData(0.0)]
     [InlineData(-60.0)]
     [InlineData(double.NaN)]
-    public void The_tick_rate_must_be_positive(double tickHz)
+    [InlineData(0.5)]
+    [InlineData(1000.5)]
+    [InlineData(1e9)]
+    [InlineData(double.PositiveInfinity)]
+    public void The_tick_rate_must_be_within_its_range(double tickHz)
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => VgmConverter.Convert(DemoSongs.FourChannel(), SoundChip.GameBoyDmg, new ConversionOptions { TickHz = tickHz }));
+    }
+
+    [Theory]
+    [InlineData(ConversionOptions.MinTickHz)]
+    [InlineData(ConversionOptions.MaxTickHz)]
+    public void The_ends_of_the_tick_rate_range_convert(double tickHz)
+    {
+        var source = TestVgm.Nes([(0x4015, 0x01), (0x4000, 0xBF), (0x4002, 0xFD), (0x4003, 0x08)], [], []);
+
+        var result = VgmConverter.Convert(source, SoundChip.GameBoyDmg, new ConversionOptions { TickHz = tickHz });
+
+        Assert.Equal(3 * TestVgm.FrameSamples, TestVgm.TotalSamples(result.Vgm));
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(0x7FFFFFFFu)]
+    [InlineData(0xFFFFFFFFu)]
+    public void The_length_comes_from_the_commands_and_not_from_the_header(uint declared)
+    {
+        var source = TestVgm.Nes([(0x4015, 0x01), (0x4000, 0xBF), (0x4002, 0xFD), (0x4003, 0x08)], [], []);
+        BinaryPrimitives.WriteUInt32LittleEndian(source.AsSpan(0x18), declared);
+
+        var result = VgmConverter.Convert(source, SoundChip.GameBoyDmg, new ConversionOptions { Analyze = true });
+
+        Assert.Equal(3 * TestVgm.FrameSamples, result.Report["source"]!["total_samples"]!.GetValue<int>());
+        Assert.Equal(3 * TestVgm.FrameSamples, TestVgm.TotalSamples(result.Vgm));
+    }
+
+    [Fact]
+    public void The_loop_comes_from_the_loop_offset_and_not_from_the_header_totals()
+    {
+        var source = TestVgm.NesLooping(1, [(0x4015, 0x01), (0x4000, 0xBF), (0x4002, 0xFD), (0x4003, 0x08)], [], []);
+        BinaryPrimitives.WriteUInt32LittleEndian(source.AsSpan(0x18), 0x7FFFFFFFu);
+        BinaryPrimitives.WriteUInt32LittleEndian(source.AsSpan(0x20), 0x12345u);
+
+        var result = VgmConverter.Convert(source, SoundChip.GameBoyDmg);
+
+        Assert.Equal(TestVgm.FrameSamples, result.Report["source"]!["loop_sample"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public void A_log_that_waits_longer_than_an_hour_is_refused()
+    {
+        const int OneHour = 44100 * 60 * 60;
+        var waits = (OneHour / 0xFFFF) + 1;
+        byte[] commands = [.. Enumerable.Repeat<byte[]>([0x61, 0xFF, 0xFF], waits).SelectMany(wait => wait), 0x66];
+
+        var error = Assert.Throws<VgmFormatException>(() => VgmConverter.Convert(TestVgm.Raw(0x84, commands), SoundChip.GameBoyDmg));
+
+        Assert.Contains("lasts more than 60 minutes", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_vgz_that_inflates_past_the_size_limit_is_refused()
+    {
+        using var buffer = new MemoryStream();
+        using (var gzip = new GZipStream(buffer, CompressionLevel.Fastest))
+        {
+            var zeros = new byte[1024 * 1024];
+            for (var megabyte = 0; megabyte <= 64; megabyte++)
+            {
+                gzip.Write(zeros);
+            }
+        }
+
+        var error = Assert.Throws<VgmFormatException>(() => VgmConverter.Convert(buffer.ToArray(), SoundChip.GameBoyDmg));
+
+        Assert.Contains("larger than 64 MB", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

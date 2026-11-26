@@ -2,7 +2,9 @@
 # Uses DotnetDeployer to publish NuGet packages
 
 trigger:
-  - master
+  branches:
+    include:
+      - '*'
 
 variables:
   - group: api-keys
@@ -34,8 +36,6 @@ steps:
   - pwsh: dotnetdeployer --dry-run
     displayName: Create NuGet packages only (dry run)
     condition: and(succeeded(), ne(variables['Build.SourceBranch'], 'refs/heads/master'))
-    env:
-      NUGET_API_KEY: $(NugetApiKey)
 
   # Create and Publish NuGet packages (for master branch only)
   - pwsh: dotnetdeployer

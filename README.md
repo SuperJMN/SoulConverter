@@ -66,6 +66,11 @@ Los errores de formato son `VgmFormatException`; un chip que no es ninguno de lo
 tres (o un chip de expansión de la NES) es `UnsupportedChipException`, con el
 nombre del chip en el mensaje.
 
+Como la entrada puede venir de cualquier sitio, hay límites: un log de más de
+64 MB (comprimido o descomprimido) o de más de una hora también es
+`VgmFormatException`, y `TickHz` va de 1 a 1000. La duración y el bucle salen de
+los comandos del log, no de los totales de la cabecera, que pueden mentir.
+
 ## La línea de comandos
 
 La orden es una capa fina sobre la biblioteca: lee y escribe ficheros e imprime
@@ -107,7 +112,7 @@ Desde el repositorio, sin instalar nada: `dotnet run --project src/SoulConverter
 | Opción | Efecto |
 |---|---|
 | `--to auto\|nes\|gb\|sms` | chip de destino. `auto` (por defecto) lleva un log de NES al Game Boy y uno de Game Boy a la NES; un log de SN76489 necesita que se lo digas. |
-| `--tick-hz N` | resolución de la rejilla de conversión (60 Hz por defecto). Súbelo si el tema usa arpegios rápidos. |
+| `--tick-hz N` | resolución de la rejilla de conversión (60 Hz por defecto, de 1 a 1000). Súbelo si el tema usa arpegios rápidos. |
 | `--volume-mode retrigger` | (por defecto, destino Game Boy) volumen fijo por tick igual al del origen, re-disparando el canal cada vez que cambia. Sigue la dinámica con precisión, a costa de más bytes. |
 | `--volume-mode envelope` | traslada la envolvente del origen a la unidad de envolvente del Game Boy una sola vez por nota. Sale más pequeño y no chasquea. |
 | `--no-transpose` | recorta las notas por debajo del rango del destino en vez de subirlas una octava. |

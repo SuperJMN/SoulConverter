@@ -6,9 +6,16 @@ public sealed record ConversionOptions
     /// <summary>The default options.</summary>
     public static ConversionOptions Default { get; } = new();
 
+    /// <summary>The lowest <see cref="TickHz"/> accepted.</summary>
+    public const double MinTickHz = 1.0;
+
+    /// <summary>The highest <see cref="TickHz"/> accepted.</summary>
+    public const double MaxTickHz = 1000.0;
+
     /// <summary>
     /// The resolution of the conversion grid, in ticks per second. 60 by default; raise it when
     /// the source updates a voice several times per frame (fast arpeggios), at the cost of size.
+    /// Between <see cref="MinTickHz"/> and <see cref="MaxTickHz"/>.
     /// </summary>
     public double TickHz { get; init; } = 60.0;
 

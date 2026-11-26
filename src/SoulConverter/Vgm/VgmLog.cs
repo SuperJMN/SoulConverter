@@ -44,6 +44,12 @@ internal sealed class VgmLog
 {
     public const int SampleRate = 44100;
 
+    /// <summary>The longest log read, one hour: a longer one is a corrupt header or a hostile file.</summary>
+    public const int MaxSamples = SampleRate * 60 * 60;
+
+    /// <summary>The largest log read, compressed or not.</summary>
+    public const int MaxBytes = 64 * 1024 * 1024;
+
     public required SoundChip Chip { get; init; }
 
     public required int ClockHz { get; init; }
@@ -52,7 +58,7 @@ internal sealed class VgmLog
 
     public int TotalSamples { get; set; }
 
-    public int? LoopSample { get; init; }
+    public int? LoopSample { get; set; }
 
     public byte[]? Gd3 { get; init; }
 
@@ -105,6 +111,11 @@ internal static class VgmLogReader
     /// <summary>Returns the VGM bytes of <paramref name="raw"/>, decompressing a gzipped VGZ.</summary>
     public static byte[] Decompress(ReadOnlySpan<byte> raw)
     {
+        if (raw.Length > VgmLog.MaxBytes)
+        {
+            throw TooLarge();
+        }
+
         if (raw.Length < 2 || raw[0] != 0x1F || raw[1] != 0x8B)
         {
             return raw.ToArray();
@@ -114,9 +125,7 @@ internal static class VgmLogReader
         {
             using var input = new MemoryStream(raw.ToArray());
             using var gzip = new GZipStream(input, CompressionMode.Decompress);
-            using var output = new MemoryStream();
-            gzip.CopyTo(output);
-            return output.ToArray();
+            return ReadAtMost(gzip);
         }
         catch (InvalidDataException error)
         {
@@ -124,31 +133,43 @@ internal static class VgmLogReader
         }
     }
 
+    /// <summary>Reads <paramref name="stream"/> to the end, refusing more than <see cref="VgmLog.MaxBytes"/>.</summary>
+    public static byte[] ReadAtMost(Stream stream)
+    {
+        using var output = new MemoryStream();
+        var buffer = new byte[81920];
+        int read;
+        while ((read = stream.Read(buffer)) > 0)
+        {
+            if (output.Length + read > VgmLog.MaxBytes)
+            {
+                throw TooLarge();
+            }
+
+            output.Write(buffer, 0, read);
+        }
+
+        return output.ToArray();
+    }
+
     public static SoundChip DetectChip(byte[] data, string name) => Header(data, name).Chip;
 
     public static VgmLog Read(byte[] data, string name)
     {
         var (chip, clock, dataOffset) = Header(data, name);
-        var totalSamples = (int)U32(data, 0x18);
         var loopOffset = U32(data, 0x1C);
-        var loopSamples = (int)U32(data, 0x20);
 
         var log = new VgmLog
         {
             Chip = chip,
             ClockHz = clock,
             Version = (int)U32(data, 0x08),
-            TotalSamples = totalSamples,
-            LoopSample = loopOffset != 0 && loopSamples > 0 && loopSamples <= totalSamples ? totalSamples - loopSamples : null,
             Gd3 = ReadGd3(data),
         };
 
-        DecodeCommands(data, name, dataOffset, log);
-        if (log.Writes.Count != 0)
-        {
-            log.TotalSamples = Math.Max(log.TotalSamples, log.Writes[^1].Sample);
-        }
-
+        // The length and the loop come from the commands, not from the header's totals: a header
+        // can claim hours over a few bytes of data.
+        DecodeCommands(data, name, dataOffset, loopOffset == 0 ? -1 : 0x1C + loopOffset, log);
         return log;
     }
 
@@ -193,30 +214,41 @@ internal static class VgmLogReader
         };
     }
 
-    private static void DecodeCommands(byte[] data, string name, int position, VgmLog log)
+    private static void DecodeCommands(byte[] data, string name, int position, long loopPosition, VgmLog log)
     {
         var samples = 0;
         while (position < data.Length)
         {
             var start = position;
+            if (start == loopPosition)
+            {
+                log.LoopSample = samples;
+            }
+
             var command = data[position++];
             switch (command)
             {
                 case 0x66:
+                    log.TotalSamples = samples;
+                    if (log.LoopSample >= samples)
+                    {
+                        log.LoopSample = null;
+                    }
+
                     return;
                 case 0x61:
                     Require(data, position, 2, start, name);
-                    samples += BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(position));
+                    samples = Wait(samples, BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(position)), name);
                     position += 2;
                     break;
                 case 0x62:
-                    samples += 735;
+                    samples = Wait(samples, 735, name);
                     break;
                 case 0x63:
-                    samples += 882;
+                    samples = Wait(samples, 882, name);
                     break;
                 case >= 0x70 and <= 0x7F:
-                    samples += (command & 0x0F) + 1;
+                    samples = Wait(samples, (command & 0x0F) + 1, name);
                     break;
                 case 0xB4 when log.Chip == SoundChip.Nes2A03:
                     Require(data, position, 2, start, name);
@@ -259,6 +291,14 @@ internal static class VgmLogReader
 
         throw new VgmFormatException($"{name}: ended before the 0x66 end-of-data command");
     }
+
+    private static int Wait(int samples, int count, string name) =>
+        samples + count <= VgmLog.MaxSamples
+            ? samples + count
+            : throw new VgmFormatException($"{name}: lasts more than {VgmLog.MaxSamples / VgmLog.SampleRate / 60} minutes, the longest log SoulConverter reads");
+
+    private static VgmFormatException TooLarge() =>
+        new($"the log is larger than {VgmLog.MaxBytes / (1024 * 1024)} MB, the largest SoulConverter reads");
 
     private static void RecordNesWrite(VgmLog log, int samples, int register, int value, int offset, string name)
     {

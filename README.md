@@ -537,9 +537,9 @@ partituras escritas en los propios tests o los temas sintéticos de `DemoSongs`.
 
 ## Publicar
 
-`azure-pipelines.yml` ejecuta [DotnetDeployer](https://github.com/SuperJMN/DotnetDeployer)
-con GitVersion: en las ramas prueba el empaquetado sin publicar y en `master`
-publica en NuGet `SoulConverter` (la biblioteca) y `SoulConverter.Tool` (la orden
+Lo publica [DotnetDeployer.Fleet](https://github.com/SuperJMN/DotnetDeployer.Fleet) a
+partir de `deployer.yaml`: compila `SoulConverter.sln`, pasa los tests y sube a NuGet
+`SoulConverter` (la biblioteca) y `SoulConverter.Tool` (la herramienta dotnet, orden
 `soulconverter`). La versión sale de GitVersion (`GitVersion.yml`).
 
 ## Trabajo futuro

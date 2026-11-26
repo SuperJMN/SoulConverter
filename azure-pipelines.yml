@@ -1,0 +1,45 @@
+# Azure Pipelines configuration for SoulConverter
+# Uses DotnetDeployer to publish NuGet packages
+
+trigger:
+  branches:
+    include:
+      - '*'
+
+variables:
+  - group: api-keys
+  - name: Agent.Source.Git.ShallowFetchDepth
+    value: 0
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+  - checkout: self
+    fetchDepth: 0  # Full clone for GitVersion
+
+  # Ensure .NET 10 SDK is available
+  - task: UseDotNet@2
+    displayName: Install .NET 10 SDK
+    inputs:
+      version: '10.x'
+
+  # The tests are the release gate
+  - pwsh: dotnet test SoulConverter.sln -c Release
+    displayName: Test
+
+  # Install DotnetDeployer tool
+  - pwsh: dotnet tool install -g DotnetDeployer.Tool
+    displayName: Install DotnetDeployer
+
+  # Dry run: Create NuGet packages only (for PRs and non-master branches)
+  - pwsh: dotnetdeployer --dry-run
+    displayName: Create NuGet packages only (dry run)
+    condition: and(succeeded(), ne(variables['Build.SourceBranch'], 'refs/heads/master'))
+
+  # Create and Publish NuGet packages (for master branch only)
+  - pwsh: dotnetdeployer
+    displayName: Create and Publish NuGet packages
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+    env:
+      NUGET_API_KEY: $(NugetApiKey)

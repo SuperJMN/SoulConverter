@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>SoulConverter</RootNamespace>
+    <AssemblyName>SoulConverter</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>SoulConverter</PackageId>
+    <Authors>José Manuel Nieto</Authors>
+    <Description>Converts VGM music and sound-effect logs between the NES 2A03, the Game Boy DMG and the SN76489 (Master System, Game Gear), any chip to any other, in memory.</Description>
+    <PackageTags>vgm;chiptune;nes;2a03;gameboy;dmg;sn76489;master-system;game-gear;audio</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/SuperJMN/SoulConverter</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/SuperJMN/SoulConverter</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
